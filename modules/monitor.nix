@@ -321,7 +321,13 @@ in
         assertion = t.kind != "zfs-dynamic" || t.scanRoot != "";
         message = "nixbackup.monitor.targets.${name}: kind = \"zfs-dynamic\" requires `scanRoot` to be set.";
       })
-      cfg.targets);
+      cfg.targets)
+    ++ (lib.mapAttrsToList
+      (name: jc: {
+        assertion = jc.excludeDestinationsOf == null || cfg.targets ? ${jc.excludeDestinationsOf};
+        message = "nixbackup.monitor.journalChecks.${name}.excludeDestinationsOf refers to \"${toString jc.excludeDestinationsOf}\", which is not a name in `targets` -- check for a typo.";
+      })
+      cfg.journalChecks);
 
     systemd.services.nixbackup-monitor = {
       description = "Evaluate backup freshness/integrity from ground truth, publish to a monitoring endpoint";
@@ -482,6 +488,16 @@ in
             ''}
             ${lib.optionalString (t.kind == "zfs-leaves") ''
               for ds in ${lib.escapeShellArgs t.paths}; do
+                # This kind's MIN-across-`paths` reduction is only correct if
+                # every path IS a true leaf: `-d 1` reads one level of child
+                # datasets, so a mis-passed non-leaf path can leave a stale
+                # grandchild past that depth invisible and silently green.
+                # Fail loudly instead of guessing.
+                nchild=$(zfs list -H -o name -d 1 -t filesystem,volume "$ds" 2>/dev/null | wc -l)
+                if [ "$nchild" -gt 1 ]; then
+                  fail="$fail $(basename "$ds")(not-a-leaf:has-child-datasets)"
+                  continue
+                fi
                 # -d 1, per leaf, MIN across leaves. `-r ... | tail -1` would
                 # be a subtree MAX and can hide a dead branch behind a fresh
                 # sibling.
