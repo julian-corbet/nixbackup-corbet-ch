@@ -1,0 +1,50 @@
+/* nixbackup theme — overrides only the accent tokens of the foss v1 base.
+   Retints the central design system base accent to a rose, distinct from
+   the other project-family pages.
+
+   Contrast checked against WCAG AA (4.5:1) in both directions:
+     dark:  #fb7185 accent text on #0b1120 bg          -> ~7.0:1
+     dark:  #0b1120 accent-text on #fb7185 button bg   -> ~7.0:1
+     light: #be123c accent text on #ffffff bg          -> ~6.3:1
+     light: #ffffff accent-text on #be123c button bg   -> ~6.3:1
+*/
+
+:root {
+  /* Dark mode (and default) accent - rose. */
+  --accent: #fb7185;
+  --accent-hover: #fda4af;
+  --accent-dim: rgba(251, 113, 133, 0.12);
+  --accent-glow: rgba(251, 113, 133, 0.08);
+  --accent-text: #0b1120;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    /* Deeper rose for light mode - keeps text-on-white contrast at
+       WCAG AA (#be123c on #ffffff ~= 6.3:1). */
+    --accent: #be123c;
+    --accent-hover: #9f1239;
+    --accent-dim: rgba(190, 18, 60, 0.08);
+    --accent-glow: rgba(190, 18, 60, 0.06);
+    --accent-text: #ffffff;
+  }
+}
+
+/* Mirror both variants for an explicit data-theme toggle, so the
+   override wins in both directions regardless of how the theme
+   was chosen. */
+:root[data-theme="dark"] {
+  --accent: #fb7185;
+  --accent-hover: #fda4af;
+  --accent-dim: rgba(251, 113, 133, 0.12);
+  --accent-glow: rgba(251, 113, 133, 0.08);
+  --accent-text: #0b1120;
+}
+
+:root[data-theme="light"] {
+  --accent: #be123c;
+  --accent-hover: #9f1239;
+  --accent-dim: rgba(190, 18, 60, 0.08);
+  --accent-glow: rgba(190, 18, 60, 0.06);
+  --accent-text: #ffffff;
+}

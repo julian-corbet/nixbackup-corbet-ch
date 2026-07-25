@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>nixbackup &mdash; ZFS backup discipline as enforced NixOS modules</title>
+  <meta name="description" content="Three NixOS modules that encode the invariants a ZFS backup setup needs to stay correct: receive-destination mount safety, runtime-discovered auto-bootstrap for new child datasets, and freshness evaluated from ground truth instead of a job's exit code. Pre-alpha.">
+
+  <meta name="theme-color" content="#0b1120" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+
+  <meta property="og:title" content="nixbackup">
+  <meta property="og:description" content="ZFS backup-destination discipline, learned the hard way, as enforced NixOS modules. Verify the artifact, not the exit code.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://nixbackup.corbet.ch">
+  <meta name="twitter:card" content="summary">
+
+  <link rel="stylesheet" href="https://v1.foss.design.corbet.ch/assets/base.css">
+  <link rel="stylesheet" href="./theme.css">
+</head>
+<body>
+
+<header class="hero">
+  <nav>
+    <a href="/" class="nav-brand">nixbackup</a>
+    <div class="nav-links">
+      <a href="https://github.com/julian-corbet/nixbackup-corbet-ch">GitHub</a>
+      <a href="#modules">Modules</a>
+      <a href="#status">Status</a>
+      <a href="#install">Install</a>
+      <details class="nav-family">
+        <summary>nix* family</summary>
+        <nav class="nav-family-panel" aria-label="The nix* project family">
+          <a href="https://nixapps.corbet.ch">nixapps <span>cluster apps as typed Nix</span></a>
+          <a href="https://nixarch.corbet.ch">nixarch <span>Arch's AUR breadth, Nix's declarative config</span></a>
+          <a href="https://nixbackup.corbet.ch" aria-current="page">nixbackup <span>verify the backup, not the exit code</span></a>
+          <a href="https://nixfish.corbet.ch">nixfish <span>your fish config as code</span></a>
+          <a href="https://nixgpu.corbet.ch">nixgpu <span>share one GPU by priority</span></a>
+          <a href="https://nixk3s.corbet.ch">nixk3s <span>the host is a flake, the cluster is git</span></a>
+          <a href="https://nixllm.corbet.ch">nixllm <span>the model store IS the registry</span></a>
+          <a href="https://nixnas.corbet.ch">nixnas <span>declarative NAS on a USB stick</span></a>
+          <a href="https://nixnet.corbet.ch">nixnet <span>the best live path to a host</span></a>
+          <a href="https://nixpush.corbet.ch">nixpush <span>one send call, any notification backend</span></a>
+          <a href="https://nixram.corbet.ch">nixram <span>RAM tuning that fits your machine</span></a>
+          <a href="https://nixremote.corbet.ch">nixremote <span>remote apps as real windows</span></a>
+          <a href="https://nixshare.corbet.ch">nixshare <span>NFS/CIFS shares that unstick themselves</span></a>
+          <a href="https://nixvibe.corbet.ch">nixvibe <span>a coding agent in a browser terminal</span></a>
+          <a href="https://nixvps.corbet.ch">nixvps <span>NixOS on sub-1GB VPSes</span></a>
+        </nav>
+      </details>
+    </div>
+  </nav>
+
+  <div class="hero-content">
+    <h1>nixbackup</h1>
+    <p class="tagline">ZFS backup discipline, learned the hard way, as enforced NixOS modules</p>
+    <p class="subtitle">Three independently toggleable modules that encode the
+    invariants a ZFS replication setup needs to stay correct over time &mdash; not
+    just on the day it was built. Each rule exists because a real, live setup
+    violated it and paid for that violation. The fix was never &ldquo;watch more
+    closely&rdquo;; it was making the wrong state structurally harder to reach, and
+    verifying the right state instead of trusting anything&rsquo;s exit code.</p>
+    <div class="cta">
+      <a href="#status" class="btn btn-primary">Read the honest status</a>
+      <a href="https://github.com/julian-corbet/nixbackup-corbet-ch" class="btn btn-secondary">View on GitHub</a>
+    </div>
+  </div>
+</header>
+
+<main>
+
+<section class="how-it-works">
+  <div class="container">
+    <h2>Three failure modes that hide behind a green dashboard</h2>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <h3>A mounted destination develops a phantom write</h3>
+        <p>Mount a receive destination&rsquo;s root and its children&rsquo;s own mounts
+        occlude the parent&rsquo;s placeholder directories &mdash; a few bytes of
+        directory-entry metadata churn that <code>zfs receive</code>&rsquo;s
+        incremental-safety check cannot tell apart from real data changing. The next
+        incremental refuses with <em>&ldquo;destination has been modified since most
+        recent snapshot&rdquo;</em>, even though every child shows zero bytes written.
+        It reads exactly like data loss. It is not one. It still costs a manual
+        re-baseline, and it recurs on every root a reboot or a rebuild remounts.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <h3>&ldquo;Auto-create the destination&rdquo; doesn&rsquo;t create anything</h3>
+        <p>Across more than one popular replication tool, the auto-create flag turns
+        out not to actually create. A newly added child dataset under an
+        already-replicating tree gets no destination at all &mdash; the tool logs
+        <em>&ldquo;destination does not exist, will be rechecked every run&rdquo;</em>
+        forever and never attempts the create, no matter how long you wait.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <h3>An exit code is not a signal</h3>
+        <p>A replication job can exit 0 every single night while silently
+        replicating nothing. A truncated <code>btrfs receive</code> can leave behind a
+        directory with a perfectly fresh timestamp and no actual snapshot subvolume
+        inside it. Both look identical to &ldquo;healthy&rdquo; from anything that
+        isn&rsquo;t reading the artifact&rsquo;s structural ground truth.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="modules" class="features">
+  <div class="container">
+    <h2>Three modules, one per failure mode</h2>
+    <div class="feature-grid">
+      <div class="feature">
+        <h3>destinations.nix</h3>
+        <p>Every backup receive-destination dataset stays <code>canmount=noauto</code>
+        + <code>readonly=on</code>, both set <strong>locally</strong> (a locally-set
+        property always wins over one carried in by a received stream), plus actually
+        unmounted. A boot and timer oneshot re-asserts all three, so nothing &mdash;
+        not a stray <code>zfs set</code>, not a host rebuild that remounts the pool
+        &mdash; can silently reopen the phantom-write divergence.</p>
+      </div>
+      <div class="feature">
+        <h3>autobootstrap.nix</h3>
+        <p>A timer that enumerates replication plans <strong>at runtime</strong> from
+        ZFS user-properties &mdash; never a hardcoded list, because a plan absent from
+        a hand-list is structurally invisible to anything built around that list
+        &mdash; and seeds any destination child that does not exist yet with one
+        <code>zfs send -w | zfs receive -u</code>. Everything it creates is
+        immediately set <code>canmount=noauto</code> + <code>readonly=on</code>, so it
+        starts life already compliant with the destinations invariant, whether or not
+        that module also runs on the same host.</p>
+      </div>
+      <div class="feature">
+        <h3>monitor.nix</h3>
+        <p>The ground-truth freshness evaluator: it stats the <strong>artifact</strong>
+        a job was supposed to produce, never the job&rsquo;s exit code. Freshness
+        reduces by per-leaf MIN, never a recursive MAX that lets one fresh child hide
+        a dead subtree. Source and destination are diffed structurally, so a
+        newly-missing child is its own failure rather than silence. Every result is
+        published to a configurable push-style monitoring endpoint.</p>
+      </div>
+      <div class="feature">
+        <h3>Husk detection</h3>
+        <p>A numbered btrfs snapshot directory that exists with no snapshot subvolume
+        ever having landed inside it reads as fresh by mtime and is actually empty.
+        The monitor calls that a husk and fails it, because the name and the timestamp
+        were never proof of a complete transfer.</p>
+      </div>
+      <div class="feature">
+        <h3>Cadence-aware staleness</h3>
+        <p>Deadlines follow the schedule the job actually runs on. A weekend
+        evaluation still compares against the last weekday the job was expected to
+        run, rather than an invented deadline that turns every Saturday into a false
+        alarm.</p>
+      </div>
+      <div class="feature">
+        <h3>Journal error budgets</h3>
+        <p>A configurable per-unit journal check, because a unit can exit 0 while its
+        own log already recorded a real per-item send or receive failure. Patterns,
+        the since-window, and the destinations to exclude are all options.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="architecture">
+  <div class="container">
+    <h2>How the three fit together</h2>
+    <pre class="arch-diagram"><code>  SOURCE POOL                                DESTINATION POOL
+  ───────────                                ────────────────
+  tank/data/a  ─┐                          ┌─ tank/backups/a
+  tank/data/b  ─┤  your replication tool   ├─ tank/backups/b
+  tank/data/c  ─┘  (znapzend, syncoid, …)  └─ tank/backups/c   ← new child
+       │                                            ▲
+       │ org.nixbackup:enabled=on                   │ seeded by
+       │ org.nixbackup:destination=…                │ send -w | receive -u
+       │                                            │
+       ├───────────────► autobootstrap ─────────────┘
+       │                 (reads properties at runtime)
+       │
+       │                 destinations ──► canmount=noauto + readonly=on
+       │                                  + unmounted, re-asserted on a timer
+       │
+       └───────────────► monitor ───────► stat the artifact, MIN-reduce,
+                                          structural diff, push the verdict</code></pre>
+    <div class="arch-details">
+      <div class="arch-detail">
+        <h3>Properties are the runtime contract</h3>
+        <p>Your replication tool&rsquo;s own config (or a small companion
+        <code>zfs set</code>) stamps <code>org.nixbackup:enabled=on</code> and
+        <code>org.nixbackup:destination=&lt;dest dataset&gt;</code> on each plan-root
+        source dataset. That pair of properties is the entire contract the modules
+        read &mdash; both property names are configurable options.</p>
+      </div>
+      <div class="arch-detail">
+        <h3>Independently toggleable</h3>
+        <p>The modules share one namespace (<code>nixbackup.*</code>) and one
+        convention, but no module depends on another being enabled. Take one, take
+        all three; a typical host enables all three.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="features">
+  <div class="container">
+    <h2>Deliberately out of scope</h2>
+    <div class="feature-grid">
+      <div class="feature">
+        <h3>Which datasets to back up, and how often</h3>
+        <p>This project has no opinion on your retention policy or your pool layout.
+        It owns the invariants that make whatever you already run stay correct, not
+        the policy decisions about what to run.</p>
+      </div>
+      <div class="feature">
+        <h3>The replication daemon itself</h3>
+        <p>nixbackup does not run or configure <code>znapzend</code>,
+        <code>syncoid</code>, or anything else that schedules and executes
+        <code>zfs send</code>/<code>receive</code> on your behalf. It assumes one of
+        those &mdash; or an equivalent you wrote yourself &mdash; already exists and
+        does the routine incremental work. nixbackup covers the three gaps those tools
+        tend to share.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="status" class="how-it-works">
+  <div class="container">
+    <h2>Status: pre-alpha, all three modules real</h2>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">!</div>
+        <h3>Extracted from a working setup</h3>
+        <p>Each rule above corresponds to an incident that was actually hit,
+        root-caused, and fixed on a live setup before being pulled out here, with
+        every site-specific value replaced by a generic parameter.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">!</div>
+        <h3>Verified at module-evaluation level</h3>
+        <p>Verified so far by NixOS module evaluation &mdash; <code>nix eval</code> on
+        each <code>nixosModules.*</code> attribute, plus a toy <code>nixosSystem</code>
+        importing all three together. Not yet run against a second, independent real
+        ZFS pool.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">!</div>
+        <h3>Nothing claimed beyond that</h3>
+        <p>Nothing advertised here is invented or missing, and nothing is claimed as
+        battle-tested beyond that evaluation level until it has actually run elsewhere.
+        Everything under Roadmap is future work, clearly marked as such.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="install" class="install">
+  <div class="container">
+    <h2>Install</h2>
+    <div class="install-grid">
+      <div class="install-method">
+        <h3>Add the flake input</h3>
+        <pre><code>inputs.nixbackup.url =
+  "github:julian-corbet/nixbackup-corbet-ch";</code></pre>
+        <p>Three flake outputs: <code>nixosModules.destinations</code>,
+        <code>nixosModules.autobootstrap</code>, and
+        <code>nixosModules.monitor</code>.</p>
+      </div>
+      <div class="install-method">
+        <h3>Enable what you need</h3>
+        <pre><code>modules = [
+  nixbackup.nixosModules.destinations
+  {
+    nixbackup.destinations = {
+      enable = true;
+      datasets = [
+        "tank/backups/dbs"
+        "tank/backups/office"
+      ];
+    };
+  }
+];</code></pre>
+      </div>
+      <div class="install-method">
+        <h3>Stamp the runtime contract</h3>
+        <pre><code>zfs set org.nixbackup:enabled=on tank/data
+zfs set org.nixbackup:destination=tank/backups/data \
+    tank/data</code></pre>
+        <p>Only <code>autobootstrap</code> and the monitor&rsquo;s
+        <code>zfs-dynamic</code> targets read these. See
+        <a href="https://github.com/julian-corbet/nixbackup-corbet-ch/blob/main/examples/configuration.nix">examples/configuration.nix</a>
+        for a complete flake wiring all three modules on one host.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="commands">
+  <div class="container">
+    <h2>Monitor target kinds</h2>
+    <div class="table-scroll">
+      <table>
+        <tbody>
+          <tr><td><code>zfs-leaves</code></td><td>Per-leaf ZFS snapshot freshness over an explicit list of datasets, MIN-reduced so one fresh leaf cannot mask a dead one.</td></tr>
+          <tr><td><code>zfs-dynamic</code></td><td>Replication plans discovered at runtime under a <code>scanRoot</code>, with a structural source-vs-destination diff. Supports a <code>cadence</code> block.</td></tr>
+          <tr><td><code>btrfs-received</code></td><td>A flat tree of received btrfs snapshot subvolumes, husk-aware: a numbered directory with no subvolume inside it fails.</td></tr>
+          <tr><td><code>btrfs-mtime</code></td><td>Plain mtime freshness for a btrfs path, when there is no subvolume structure to verify.</td></tr>
+          <tr><td><code>stampfile</code></td><td>Freshness from a file a job writes on real completion &mdash; the escape hatch for anything the other kinds cannot see.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="commands">
+  <div class="container">
+    <h2>Roadmap</h2>
+    <div class="table-scroll">
+      <table>
+        <tbody>
+          <tr><td>Receive-destination invariant</td><td><strong>Done</strong> &mdash; <code>modules/destinations.nix</code>.</td></tr>
+          <tr><td>Runtime-discovered auto-bootstrap</td><td><strong>Done</strong> &mdash; <code>modules/autobootstrap.nix</code>.</td></tr>
+          <tr><td>Ground-truth freshness monitor</td><td><strong>Done</strong> &mdash; <code>modules/monitor.nix</code>.</td></tr>
+          <tr><td>Second independent ZFS pool</td><td>Run against a real pool that isn&rsquo;t the one these were extracted from, beyond module evaluation. Planned.</td></tr>
+          <tr><td><code>lib</code> property helper</td><td>A helper for stamping the <code>org.nixbackup:*</code> properties, so a consumer doesn&rsquo;t hand-write the <code>zfs set</code> calls. Planned.</td></tr>
+          <tr><td>Cadence documentation</td><td>Full documentation of the cadence and <code>journalChecks</code> interaction beyond the inline option docs. Planned.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="container">
+    <div class="footer-links">
+      <a href="https://github.com/julian-corbet/nixbackup-corbet-ch">Source</a>
+      <a href="https://github.com/julian-corbet/nixbackup-corbet-ch/issues">Issues</a>
+    </div>
+    <p>
+      <a href="https://github.com/julian-corbet/nixbackup-corbet-ch/blob/main/LICENSE">MIT</a> &middot;
+      <a href="https://github.com/julian-corbet">Julian Corbet</a>
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>
