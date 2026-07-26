@@ -99,16 +99,35 @@ evaluation instead of trusting the tool's own reported success.
 
 ## Status
 
-**Pre-alpha, all three modules real and evaluated.** All three were
+**Pre-alpha, all three modules real and checked in CI.** All three were
 extracted and generalized from a working setup — each rule above corresponds
 to an incident that was actually hit, root-caused, and fixed on that setup
 before being pulled out here with every site-specific value replaced by a
-generic parameter. Verified so far by NixOS module evaluation (`nix eval` on
-each `nixosModules.*` attribute, plus a toy `nixosSystem` importing all
-three together) — not yet run against a second, independent real ZFS pool.
+generic parameter. Not yet run against a second, independent real ZFS pool.
 Nothing advertised here is invented or missing; nothing is claimed as
-battle-tested beyond the module-evaluation level until it has actually run
+battle-tested beyond what the checks below cover until it has actually run
 elsewhere.
+
+`nix flake check` runs three checks, from the placeholder system in
+[examples/host](examples/host):
+
+| check | what it establishes |
+|---|---|
+| `modules-evaluate` | all three modules compose into one NixOS system — catches type errors, failed assertions and option renames |
+| `destinations-enforce-invariants` | the generated unit pins `canmount=noauto` and `readonly=on`, compares against the **local** property source, and unmounts an already-mounted destination |
+| `monitor-min-reduces-freshness` | every snapshot listing is depth-limited, and freshness reduces across datasets by taking the **oldest** |
+
+The last two are behavioural, not cosmetic, and both guard failures that are
+invisible rather than loud. Dropping `-s local` still passes a naive
+"is canmount noauto?" check while losing to the next received stream. Reducing
+freshness by newest instead of oldest lets one fresh child keep an entire dead
+subtree green — the dashboard reads healthy while the backup is dead. Both are
+proven in the failing direction: break either and the check fails, naming the
+consequence rather than the diff.
+
+What the checks do **not** establish: that any of this works against real ZFS.
+They assert the units the modules generate; they do not create a pool, receive a
+stream, or mount anything. Only running it elsewhere does that.
 
 - [x] `nixosModules.destinations` (`modules/destinations.nix`)
 - [x] `nixosModules.autobootstrap` (`modules/autobootstrap.nix`)
