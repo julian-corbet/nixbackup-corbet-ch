@@ -1,14 +1,17 @@
 # nixbackup
 
-**ZFS backup-destination discipline, learned the hard way, as enforced NixOS
+**Backup-destination discipline, learned the hard way, as enforced NixOS
 modules.**
 
-Three independently toggleable modules that encode the invariants a ZFS
+Six independently toggleable modules. Three encode the invariants a ZFS
 backup/replication setup needs to actually stay correct over time — not just
 on the day it was built. Each rule here exists because a real, live setup
 violated it and paid for that violation; the fix in every case was not "watch
 more closely" but "make the wrong state structurally harder to reach, and
-verify the right state instead of trusting anything's exit code."
+verify the right state instead of trusting anything's exit code." The other
+three are a push/pull pair-of-shapes for BTRFS snapshot replication, covering
+the equivalent ground for a filesystem with no equally mature "just import
+it" NixOS module family of its own.
 
 ## The pitch
 
@@ -45,7 +48,7 @@ re-lost: not documentation to remember, but modules that assert the correct
 state, re-apply it on a schedule, and evaluate freshness from ground truth
 rather than from a log line that says "success."
 
-## The three modules
+## The six modules
 
 - **`destinations.nix`** (`nixbackup.destinations`) — every backup receive
   destination dataset stays `canmount=noauto` + `readonly=on`, both SET
@@ -79,59 +82,100 @@ rather than from a log line that says "success."
   0 while its own log already recorded a real per-item send/receive
   failure. Publishes every result to a configurable push-style monitoring
   endpoint.
+- **`btrbk-push.nix`** (`nixbackup.btrbkPush`) — a declarative front end over
+  the upstream `services.btrbk`, for a host ALLOWED to hold credentials
+  reaching outward toward a backup receiver: the PUSH shape of btrfs
+  replication. This module renders `btrbk`'s own settings from a smaller,
+  opinionated surface; it does not add any scheduling logic of its own — see
+  "Deliberately out of scope" below for why that distinction matters.
+- **`local-snapshots.nix`** (`nixbackup.localSnapshots`) — the SOURCE half of
+  the PULL shape's alternative to `btrbkPush`: local, retained, read-only
+  btrfs snapshots that a remote puller reaches in and picks up over its own
+  SSH connection. Runs on the LESS-trusted box (e.g. a public-internet-facing
+  host), which holds no outbound credential at all in this shape.
+- **`btrbk-pull.nix`** (`nixbackup.btrbkPull`) — the RECEIVER half of the pull
+  pair: this host reaches OUT to a remote node's own `localSnapshots`, picks
+  the newest one, and ships the delta home via `btrfs send -p <parent> |
+  btrfs receive`, falling back to a full send when no shared parent survives.
+  Direction matters: the remote never pushes, so a compromised remote can at
+  most be READ from, never write into the trusted side.
 
 ### Deliberately out of scope
 
 **Which datasets to back up, and how often.** This repo has no opinion on
-your retention policy, your pool layout, or your replication tool of choice
-(the modules assume `zfs send`/`receive` underneath, same as most of the
-common tools). It owns the invariants that make whatever you already run
-stay correct, not the policy decisions about what to run.
+your retention policy or your pool layout. `nixbackup.btrbkPush`'s
+`snapshotPreserve`/`targetPreserve` and `nixbackup.localSnapshots`/
+`nixbackup.btrbkPull`'s `retain`/`retainDays` are all caller-supplied, passed
+through verbatim — see `checks/` for the specific proof that a caller's own
+values reach the generated config unchanged rather than being silently
+replaced by a default this repo picked for you.
 
-**The replication daemon itself.** `nixbackup` does not run or configure
-`znapzend`, `syncoid`, or anything else that actually schedules and executes
-`zfs send`/`receive` on your behalf — it assumes one of those (or an
-equivalent you wrote yourself) already exists, stamps the ZFS user-properties
-these modules read, and does the routine incremental work. `nixbackup` covers
-the three specific gaps those tools tend to share: destination-mount safety,
-the broken-autoCreation hole for new children, and ground-truth freshness
+**Reimplementing an existing, mature replication daemon.** `nixbackup` does
+not run or configure `znapzend`, `syncoid`, or anything else that already
+schedules and executes **ZFS** `send`/`receive` on your behalf — it assumes
+one of those (or an equivalent you wrote yourself) already exists, stamps the
+ZFS user-properties `destinations.nix`/`autobootstrap.nix` read, and does the
+routine incremental work. Those two modules, plus `monitor.nix`, cover the
+three specific gaps those tools tend to share: destination-mount safety, the
+broken-autoCreation hole for new children, and ground-truth freshness
 evaluation instead of trusting the tool's own reported success.
+
+This does NOT extend to the **btrfs** side (`btrbk-push.nix`/
+`local-snapshots.nix`/`btrbk-pull.nix`): unlike ZFS, there is no equally
+mature, "just import it" NixOS module family for a pull-based btrfs
+replication pair, so this repo ships one — `btrbk-push.nix` is a thin
+wrapper around the upstream `services.btrbk` tool (not a competing
+scheduler), and `local-snapshots.nix`/`btrbk-pull.nix` are a small, from-
+scratch implementation of the pull shape, kept intentionally minimal (one
+subvolume tree, one remote) rather than growing into a general-purpose
+replication engine.
 
 ## Status
 
-**Pre-alpha, all three modules real and checked in CI.** All three were
+**Pre-alpha, all six modules real and checked in CI.** The first three were
 extracted and generalized from a working setup — each rule above corresponds
 to an incident that was actually hit, root-caused, and fixed on that setup
 before being pulled out here with every site-specific value replaced by a
-generic parameter. Not yet run against a second, independent real ZFS pool.
-Nothing advertised here is invented or missing; nothing is claimed as
-battle-tested beyond what the checks below cover until it has actually run
-elsewhere.
+generic parameter. The btrfs trio (`btrbk-push`/`local-snapshots`/
+`btrbk-pull`) was extracted the same way from a real pull-based offsite
+backup. Not yet run against a second, independent real ZFS pool. Nothing
+advertised here is invented or missing; nothing is claimed as battle-tested
+beyond what the checks below cover until it has actually run elsewhere.
 
-`nix flake check` runs three checks, from the placeholder system in
+`nix flake check` runs these checks, from the placeholder system in
 [examples/host](examples/host):
 
 | check | what it establishes |
 |---|---|
-| `modules-evaluate` | all three modules compose into one NixOS system — catches type errors, failed assertions and option renames |
+| `modules-evaluate` | all six modules compose into one NixOS system — catches type errors, failed assertions and option renames |
 | `destinations-enforce-invariants` | the generated unit pins `canmount=noauto` and `readonly=on`, compares against the **local** property source, and unmounts an already-mounted destination |
 | `monitor-min-reduces-freshness` | every snapshot listing is depth-limited, and freshness reduces across datasets by taking the **oldest** |
+| `btrbkpush-passes-through-caller-policy-verbatim` | the caller's own `snapshotPreserve`/`targetPreserve`/`incremental` reach `services.btrbk`'s settings unchanged — this module renders, it does not invent a policy |
+| `localsnapshots-retain-is-wired` | the generated script retires past the CALLER's `retain` count, not this module's own default |
+| `btrbkpull-preserves-newest-and-falls-back-to-full-send` | the newest received snapshot is never a retention candidate, and a missing shared parent degrades to a full send instead of failing outright |
+| `btrbkpull-requires-remotehost` | omitting the one fact this module cannot guess (`remoteHost`) fails the build; supplying it does not |
+| `localsnapshots-requires-source-and-snapshotdir` | same proof, for `localSnapshots`' `source`/`snapshotDir` |
 
-The last two are behavioural, not cosmetic, and both guard failures that are
+These are behavioural, not cosmetic, and each guards a failure that is
 invisible rather than loud. Dropping `-s local` still passes a naive
 "is canmount noauto?" check while losing to the next received stream. Reducing
 freshness by newest instead of oldest lets one fresh child keep an entire dead
-subtree green — the dashboard reads healthy while the backup is dead. Both are
-proven in the failing direction: break either and the check fails, naming the
-consequence rather than the diff.
+subtree green — the dashboard reads healthy while the backup is dead. Every
+required-option check above is proven in BOTH directions: omitted fails,
+supplied succeeds — not just "it evaluates when every field happens to be
+filled in".
 
-What the checks do **not** establish: that any of this works against real ZFS.
-They assert the units the modules generate; they do not create a pool, receive a
-stream, or mount anything. Only running it elsewhere does that.
+What the checks do **not** establish: that any of this works against real ZFS
+or btrfs. They assert the units the modules generate; they do not create a
+pool, receive a stream, or mount anything. Only running it elsewhere does
+that.
 
 - [x] `nixosModules.destinations` (`modules/destinations.nix`)
 - [x] `nixosModules.autobootstrap` (`modules/autobootstrap.nix`)
 - [x] `nixosModules.monitor` (`modules/monitor.nix`)
+- [x] `nixosModules.btrbkPush` (`modules/btrbk-push.nix`)
+- [x] `nixosModules.localSnapshots` (`modules/local-snapshots.nix`)
+- [x] `nixosModules.btrbkPull` (`modules/btrbk-pull.nix`)
 
 ## Usage
 
@@ -270,21 +314,85 @@ needs to stamp `org.nixbackup:enabled=on` and
 }
 ```
 
+### btrbkPush: push btrfs snapshots to a receiver you control
+
+```nix
+{
+  inputs.nixbackup.url = "github:<you>/nixbackup";
+
+  outputs = { self, nixpkgs, nixbackup }: {
+    nixosConfigurations.source-host = nixpkgs.lib.nixosSystem {
+      modules = [
+        nixbackup.nixosModules.btrbkPush
+        {
+          nixbackup.btrbkPush = {
+            enable = true;
+
+            # REQUIRED: the one fact this module cannot guess.
+            targetHost = "backup-receiver.example.org";
+            targetPath = "/mnt/btrbackup/source-host";
+            sshIdentityFile = "/etc/ssh/nixbackup_btrbk_push_ed25519";
+            sourceVolume = "/data";
+            snapshotDir = "/data/snapshots";
+            subvolumes = [ "data" ];
+
+            # REQUIRED: this repo has no opinion on your retention policy.
+            snapshotPreserve = "24h 7d 4w";
+            targetPreserve = "14d 8w 12m";
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
+### localSnapshots + btrbkPull: pull-based pair for a less-trusted source
+
+On the **less-trusted** host (holds zero outbound credentials):
+
+```nix
+nixbackup.localSnapshots = {
+  enable = true;
+  source = "/data/hot";
+  snapshotDir = "/data/snapshots/hot";
+  retain = 48; # must outlive the gap between pulls — see the module's own header
+};
+```
+
+On the **receiving** host (reaches out, reads only):
+
+```nix
+nixbackup.btrbkPull = {
+  enable = true;
+  remoteHost = "203.0.113.5"; # the less-trusted host above
+  remoteSnapshotDir = "/data/snapshots/hot"; # must match its localSnapshots.snapshotDir
+  targetPath = "/mnt/btrfs-backup/source-host";
+  sshIdentityFile = "/root/.ssh/id_nixbackup_pull"; # dedicated to this pull, nothing shared
+  retainDays = 14;
+};
+```
+
 ## Full example
 
 See [`examples/configuration.nix`](examples/configuration.nix) for a
-complete, generic flake wiring all three modules together on one host.
+complete, generic flake wiring the three ZFS-focused modules together on one
+host, and [`examples/host/configuration.nix`](examples/host/configuration.nix)
+for all six (the composed system every check in this flake runs against).
 
 ## Roadmap
 
 - [x] Receive-destination invariant enforcement — `modules/destinations.nix`
 - [x] Runtime-discovered auto-bootstrap — `modules/autobootstrap.nix`
 - [x] Ground-truth freshness/integrity monitor — `modules/monitor.nix`
+- [x] btrfs push replication (front end over `services.btrbk`) — `modules/btrbk-push.nix`
+- [x] btrfs pull replication pair — `modules/local-snapshots.nix` + `modules/btrbk-pull.nix`
 
 Future work:
 
 - [ ] Run against a second, independent real ZFS pool (not just module
       evaluation)
+- [ ] Run the btrfs pair against a second, independent real btrfs deployment
 - [ ] A `lib` helper for stamping the `org.nixbackup:*` properties this repo
       reads, so a consumer doesn't have to hand-write the `zfs set` calls
 - [ ] Full documentation of the cadence/`journalChecks` interaction beyond
@@ -293,9 +401,14 @@ Future work:
 ## Related projects
 
 `nixbackup` is one of several independent, narrowly-scoped NixOS/Nix
-projects. [nixvps](https://github.com/julian-corbet/nixvps-corbet-ch) does
-the same "hard-won discipline as reusable modules" pattern for tiny cloud
-VMs; [nixram](https://github.com/julian-corbet/nixram-corbet-ch) handles
+projects. [nixstorage](https://github.com/julian-corbet/nixstorage-corbet-ch)
+is the sibling that owns dataset SHAPE/delivery/ownership and idle-/RAM-/
+temperature-gated scrub scheduling — this repo starts where a dataset already
+exists and is already shaped; [nixpower](https://github.com/julian-corbet/nixpower-corbet-ch)
+owns the host's power stance, including the ATA standby timers that spin the
+disks backing any of these datasets down when idle. [nixvps](https://github.com/julian-corbet/nixvps-corbet-ch)
+does the same "hard-won discipline as reusable modules" pattern for tiny
+cloud VMs; [nixram](https://github.com/julian-corbet/nixram-corbet-ch) handles
 memory-pressure tuning. Use them together or separately.
 
 ## License

@@ -22,6 +22,43 @@
     sourcePool = "example-hot";
   };
 
+  # A declarative front end over the upstream `services.btrbk` -- the PUSH shape
+  # of btrfs replication, for a host allowed to hold outbound credentials.
+  nixbackup.btrbkPush = {
+    enable = true;
+    targetHost = "backup-receiver.example.org";
+    targetPath = "/mnt/btrbackup/example-source";
+    sshIdentityFile = "/etc/ssh/nixbackup_btrbk_push_ed25519";
+    sourceVolume = "/data";
+    snapshotDir = "/data/snapshots";
+    subvolumes = [ "data" ];
+    snapshotPreserve = "24h 7d 4w";
+    targetPreserve = "14d 8w 12m";
+  };
+
+  # The PULL shape's two halves -- SOURCE (localSnapshots, run on the less-
+  # trusted box) and RECEIVER (btrbkPull, run on the box doing the pulling).
+  # Composed on the SAME example host purely so both type-check together;
+  # a real deployment runs them on two different machines (see each
+  # module's own header for the trust-direction rationale).
+  nixbackup.localSnapshots = {
+    enable = true;
+    source = "/data/hot";
+    snapshotDir = "/data/snapshots/hot";
+    retain = 48;
+    onCalendar = "hourly";
+  };
+
+  nixbackup.btrbkPull = {
+    enable = true;
+    remoteHost = "203.0.113.5";
+    remoteSnapshotDir = "/data/snapshots/hot";
+    targetPath = "/mnt/btrfs-backup/example-node";
+    sshIdentityFile = "/root/.ssh/id_nixbackup_pull";
+    retainDays = 14;
+    onCalendar = "03:30";
+  };
+
   # Evaluate every target from ground truth and push the verdict out. Several
   # kinds are configured on purpose: each `kind` takes a different path through
   # the generated script, so a check over one kind proves nothing about the rest.

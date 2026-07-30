@@ -12,10 +12,13 @@
       forAllSystems = f: lib.genAttrs systems f;
     in
     {
-      # Three modules, each independently toggleable, sharing one namespace
-      # (`nixbackup.*`) and one convention (ZFS user-properties as the
-      # runtime source of truth, never a hand-maintained list). See
-      # README.md for the pitch and per-module usage.
+      # Six modules, each independently toggleable, sharing one namespace
+      # (`nixbackup.*`). The first three share one convention (ZFS
+      # user-properties as the runtime source of truth, never a
+      # hand-maintained list); the next three are the BTRFS replication
+      # pair-of-shapes (push and pull) plus the local-snapshot source the
+      # pull side depends on. See README.md for the pitch and per-module
+      # usage.
       nixosModules = {
         # nixbackup.destinations: enforce canmount=noauto + readonly=on
         # (both LOCAL) + unmounted on every backup receive-destination
@@ -32,6 +35,24 @@
         # ground truth (never a job's own exit code) and push the verdict to
         # a configurable push-style monitoring endpoint.
         monitor = ./modules/monitor.nix;
+
+        # nixbackup.btrbkPush: a declarative front end over the upstream
+        # `services.btrbk`, for a host allowed to hold credentials reaching
+        # OUTWARD toward a backup receiver. See the module's own header for
+        # why this is not "nixbackup running a competing daemon".
+        btrbkPush = ./modules/btrbk-push.nix;
+
+        # nixbackup.localSnapshots: the SOURCE half of the pull-based
+        # alternative to btrbkPush -- local, retained, read-only btrfs
+        # snapshots a remote puller (btrbkPull, below) reaches in and picks
+        # up over its OWN SSH connection.
+        localSnapshots = ./modules/local-snapshots.nix;
+
+        # nixbackup.btrbkPull: the RECEIVER half of the pull-based pair --
+        # this host reaches OUT to a remote node's own localSnapshots and
+        # receives the delta home. A remote holding zero inbound-writing
+        # credentials, the opposite trust shape from btrbkPush.
+        btrbkPull = ./modules/btrbk-pull.nix;
       };
 
       lib = { };
@@ -51,6 +72,30 @@
           };
 
           units = host.config.systemd.services;
+
+          bareStubs = {
+            boot.loader.grub.enable = false;
+            fileSystems."/" = { device = "none"; fsType = "tmpfs"; };
+            system.stateVersion = "25.05";
+          };
+
+          # A required option (no default -- `remoteHost`, `source`,
+          # `snapshotDir`, ...) with nothing supplied is a MISSING-VALUE
+          # error, not a `config.assertions` failure, and (like a type
+          # constraint) is only forced deep enough to surface by reaching
+          # `.drvPath`, not by a bare `seq` of the `system.build.toplevel`
+          # attrset -- see the option's own consumer (the `script`
+          # attribute the missing value would have to render into).
+          buildFailsWith = modulePath: extraConfig:
+            !(builtins.tryEval (
+              builtins.seq
+                (builtins.unsafeDiscardStringContext
+                  (lib.nixosSystem {
+                    inherit system;
+                    modules = [ modulePath extraConfig bareStubs ];
+                  }).config.system.build.toplevel.drvPath)
+                true
+            )).success;
 
           # A check over generated shell: hand the script to a derivation and
           # assert against it. Each assertion carries the reason it exists, so a
@@ -145,6 +190,110 @@
                 why = "reducing by newest lets one fresh child mask a dead subtree";
               }
             ];
+
+          # 4. btrbkPush is a MECHANISM, not a policy -- it must carry the
+          #    caller's own retention strings through to `services.btrbk`
+          #    verbatim, never substitute a baked-in default of its own
+          #    (see the README's "Deliberately out of scope").
+          btrbkpush-passes-through-caller-policy-verbatim =
+            let
+              settings = host.config.services.btrbk.instances.nixbackup.settings;
+              ok =
+                settings.snapshot_preserve == "24h 7d 4w"
+                && settings.target_preserve == "14d 8w 12m"
+                && settings.incremental == "strict"
+                && settings.send_compressed_data == "yes"
+                && settings.target_preserve_min == "no";
+            in
+            if ok then
+              pkgs.runCommand "nixbackup-check-btrbkpush" { } "echo ok > $out"
+            else
+              throw "nixbackup.btrbkPush: expected the example host's own snapshotPreserve/targetPreserve/incremental to reach services.btrbk.instances.nixbackup.settings unchanged, but at least one value was substituted or lost";
+
+          # 5. localSnapshots must wire the CALLER's `retain`, not its own
+          #    module default (24) -- the example host sets 48.
+          localsnapshots-retain-is-wired =
+            assertScript "local-snapshots" units.nixbackup-local-snapshots.script [
+              {
+                name = "retires past the CALLER's retain count (48), not the module default (24)";
+                test = ''grep -q -- "head -n -48" ./script.sh'';
+                why = "hardcoding the module's own default here would silently ignore every caller's own nixbackup.localSnapshots.retain";
+              }
+              {
+                name = "snapshots are read-only (-r)";
+                test = ''grep -q -- "btrfs subvolume snapshot -r" ./script.sh'';
+                why = "a writable snapshot can itself be mutated, defeating the point of a fixed replication source";
+              }
+            ];
+
+          # 6. btrbkPull: the newest RECEIVED snapshot is never a retention
+          #    candidate (it is tomorrow's incremental parent), and a
+          #    missing shared parent falls back to a full send rather than
+          #    failing outright.
+          btrbkpull-preserves-newest-and-falls-back-to-full-send =
+            assertScript "btrbk-pull" units.nixbackup-btrbk-pull.script [
+              {
+                name = "never retires the newest received snapshot";
+                test = ''grep -q -- '\[ "\$old" = "\$NEWEST" \] && continue' ./script.sh'';
+                why = "the newest received snapshot is the parent for the NEXT incremental pull; deleting it forces every future pull to a full send";
+              }
+              {
+                name = "falls back to a full send when no shared parent exists";
+                test = ''grep -q "FULL send" ./script.sh'';
+                why = "without an explicit fallback, a broken parent chain (e.g. the remote's own retention already expired it) would fail the pull outright instead of degrading to a full send";
+              }
+              {
+                name = "ships compressed extents as-is (--compressed-data)";
+                test = ''[ "$(grep -c -- "--compressed-data" ./script.sh)" -ge 2 ]'';
+                why = "decompressing and recompressing on every pull burns CPU for data that is already compressed on disk";
+              }
+            ];
+
+          # 7. Required, no-default options actually fail the build when
+          #    omitted -- proven in BOTH directions, not just "it evaluates
+          #    when you fill in every field".
+          btrbkpull-requires-remotehost =
+            let
+              missing = buildFailsWith self.nixosModules.btrbkPull {
+                nixbackup.btrbkPull = {
+                  enable = true;
+                  remoteSnapshotDir = "/data/snapshots/hot";
+                  targetPath = "/mnt/btrfs-backup/example";
+                  sshIdentityFile = "/root/.ssh/id_example";
+                };
+              };
+              present = buildFailsWith self.nixosModules.btrbkPull {
+                nixbackup.btrbkPull = {
+                  enable = true;
+                  remoteHost = "203.0.113.5";
+                  remoteSnapshotDir = "/data/snapshots/hot";
+                  targetPath = "/mnt/btrfs-backup/example";
+                  sshIdentityFile = "/root/.ssh/id_example";
+                };
+              };
+            in
+            if missing && !present then
+              pkgs.runCommand "nixbackup-check-btrbkpull-required" { } "echo ok > $out"
+            else
+              throw "nixbackup.btrbkPull.remoteHost: expected omitting it to fail the build and supplying it to succeed, got missing=${toString missing} present=${toString present}";
+
+          localsnapshots-requires-source-and-snapshotdir =
+            let
+              missing = buildFailsWith self.nixosModules.localSnapshots {
+                nixbackup.localSnapshots.enable = true;
+              };
+              present = buildFailsWith self.nixosModules.localSnapshots {
+                nixbackup.localSnapshots = {
+                  enable = true;
+                  source = "/data/hot";
+                  snapshotDir = "/data/snapshots/hot";
+                };
+              };
+            in
+            if missing && !present then
+              pkgs.runCommand "nixbackup-check-localsnapshots-required" { } "echo ok > $out"
+            else
+              throw "nixbackup.localSnapshots.{source,snapshotDir}: expected omitting them to fail the build and supplying them to succeed, got missing=${toString missing} present=${toString present}";
         });
 
       formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixpkgs-fmt);
