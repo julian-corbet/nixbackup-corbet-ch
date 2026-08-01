@@ -85,6 +85,24 @@
     };
   };
 
+  # snapper-backup: the same push shape as btrbkPush above, for a non-NixOS
+  # host whose only snapshot tool is the `snapper` package's bundled `snbk`.
+  # Composed here purely for eval coverage -- see modules/snapper-backup.nix's
+  # own "TESTING NOTE".
+  nixbackup.snapperBackup = {
+    enable = true;
+    targetHost = "backup-receiver.example.org";
+    targetPathPrefix = "/mnt/btrfs-backup/example-host";
+    sshIdentityFile = "/etc/ssh/nixbackup_snapper_ed25519";
+    onCalendar = "hourly";
+    backups = {
+      root = {
+        sourcePath = "/";
+        targetSubvolume = "@";
+      };
+    };
+  };
+
   # ── Stubs NixOS demands of any bootable system ───────────────────────────
   # tmpfs on / could never boot a real machine, which is the point: this config
   # exists to type-check modules, not to describe hardware.

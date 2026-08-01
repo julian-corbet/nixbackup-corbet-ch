@@ -12,13 +12,15 @@
       forAllSystems = f: lib.genAttrs systems f;
     in
     {
-      # Six modules, each independently toggleable, sharing one namespace
-      # (`nixbackup.*`). The first three share one convention (ZFS
-      # user-properties as the runtime source of truth, never a
-      # hand-maintained list); the next three are the BTRFS replication
-      # pair-of-shapes (push and pull) plus the local-snapshot source the
-      # pull side depends on. See README.md for the pitch and per-module
-      # usage.
+      # Six NixOS modules, plus a seventh system-manager-only one, each
+      # independently toggleable, sharing one namespace (`nixbackup.*`). The
+      # first three share one convention (ZFS user-properties as the runtime
+      # source of truth, never a hand-maintained list); the next three are
+      # the BTRFS replication pair-of-shapes (push and pull) plus the
+      # local-snapshot source the pull side depends on; the seventh
+      # (systemManagerModules.snapperBackup) covers the same push shape as
+      # btrbkPush for a non-NixOS host with no equivalent native module. See
+      # README.md for the pitch and per-module usage.
       nixosModules = {
         # nixbackup.destinations: enforce canmount=noauto + readonly=on
         # (both LOCAL) + unmounted on every backup receive-destination
@@ -55,6 +57,15 @@
         btrbkPull = ./modules/btrbk-pull.nix;
       };
 
+      # A seventh module, system-manager only (see its own header for why no
+      # nixosModules export -- nixpkgs' own services.snapper is the better
+      # fit for a real NixOS host). Otherwise the same push shape as
+      # btrbkPush, for a non-NixOS host (Arch/CachyOS today) whose only
+      # snapshot-replication tool is the `snapper` package's bundled `snbk`.
+      systemManagerModules = {
+        snapperBackup = ./modules/snapper-backup.nix;
+      };
+
       lib = { };
 
       # The word "tested" in the description above is earned here. Two of these
@@ -64,11 +75,15 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
 
-          # All three modules composed into one system, from examples/host.
+          # All modules composed into one system, from examples/host.
+          # snapper-backup.nix is included directly (not via self.nixosModules
+          # -- it's system-manager-only in the public API) purely so it gets
+          # the same eval coverage as everything else; see its own header's
+          # "TESTING NOTE" for why lib.nixosSystem can evaluate it at all.
           host = lib.nixosSystem {
             inherit system;
             modules = lib.attrValues self.nixosModules
-              ++ [ ./examples/host/configuration.nix ];
+              ++ [ ./modules/snapper-backup.nix ./examples/host/configuration.nix ];
           };
 
           units = host.config.systemd.services;
@@ -294,6 +309,59 @@
               pkgs.runCommand "nixbackup-check-localsnapshots-required" { } "echo ok > $out"
             else
               throw "nixbackup.localSnapshots.{source,snapshotDir}: expected omitting them to fail the build and supplying them to succeed, got missing=${toString missing} present=${toString present}";
+
+          # 8. snapperBackup: required options (no defaults) actually fail the
+          #    build when omitted, same proof-in-both-directions shape as 7.
+          snapperbackup-requires-target-options =
+            let
+              missing = buildFailsWith ./modules/snapper-backup.nix {
+                nixbackup.snapperBackup.enable = true;
+              };
+              present = buildFailsWith ./modules/snapper-backup.nix {
+                nixbackup.snapperBackup = {
+                  enable = true;
+                  targetHost = "backup-receiver.example.org";
+                  targetPathPrefix = "/mnt/btrfs-backup/example-host";
+                  sshIdentityFile = "/etc/ssh/nixbackup_snapper_ed25519";
+                };
+              };
+            in
+            if missing && !present then
+              pkgs.runCommand "nixbackup-check-snapperbackup-required" { } "echo ok > $out"
+            else
+              throw "nixbackup.snapperBackup.{targetHost,targetPathPrefix,sshIdentityFile}: expected omitting them to fail the build and supplying them to succeed, got missing=${toString missing} present=${toString present}";
+
+          # 9. The module's own header explains WHY the drop-in leads with an
+          #    empty OnCalendar=: systemd ADDS repeated keys instead of
+          #    replacing them, so without the clear-first line, a future
+          #    `snapper` package default change would fire a SECOND trigger
+          #    alongside this one rather than being superseded by it. Order
+          #    matters here, not just presence -- this pins the order.
+          snapperbackup-dropin-clears-before-setting-oncalendar =
+            let
+              text = host.config.environment.etc."systemd/system/snapper-backup.timer.d/50-declared-schedule.conf".text;
+              hasOrderedClear = lib.strings.hasInfix "OnCalendar=\nOnCalendar=hourly" text;
+            in
+            if hasOrderedClear then
+              pkgs.runCommand "nixbackup-check-snapperbackup-dropin-order" { } "echo ok > $out"
+            else
+              throw "nixbackup.snapperBackup: expected the timer drop-in to clear OnCalendar= before setting the declared value (in that order), got:\n${text}";
+
+          # 10. The whole point of targetPathPrefix + per-backup targetSubvolume
+          #     is that they compose into the real target-path snbk actually
+          #     uses -- a rename/typo in either half must be visible here, not
+          #     silently drop the join.
+          snapperbackup-json-composes-target-path =
+            let
+              text = host.config.environment.etc."snapper/backup-configs/root.json".text;
+              ok =
+                lib.strings.hasInfix "\"target-path\":\"/mnt/btrfs-backup/example-host/@\"" text
+                && lib.strings.hasInfix "\"ssh-host\":\"backup-receiver.example.org\"" text;
+            in
+            if ok then
+              pkgs.runCommand "nixbackup-check-snapperbackup-json" { } "echo ok > $out"
+            else
+              throw "nixbackup.snapperBackup: expected the rendered JSON's target-path to be targetPathPrefix/targetSubvolume and ssh-host to be targetHost, got:\n${text}";
         });
 
       formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixpkgs-fmt);
