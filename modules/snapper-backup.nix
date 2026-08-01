@@ -138,18 +138,19 @@ in
     targetToolBins = lib.mkOption {
       type = lib.types.attrsOf lib.types.path;
       default = {
-        btrfs-bin = "/run/current-system/sw/bin/btrfs";
-        ls-bin = "/run/current-system/sw/bin/ls";
-        mkdir-bin = "/run/current-system/sw/bin/mkdir";
-        rm-bin = "/run/current-system/sw/bin/rm";
-        rmdir-bin = "/run/current-system/sw/bin/rmdir";
-        sha256sum-bin = "/run/current-system/sw/bin/sha256sum";
+        btrfs = "/run/current-system/sw/bin/btrfs";
+        ls = "/run/current-system/sw/bin/ls";
+        mkdir = "/run/current-system/sw/bin/mkdir";
+        rm = "/run/current-system/sw/bin/rm";
+        rmdir = "/run/current-system/sw/bin/rmdir";
+        sha256sum = "/run/current-system/sw/bin/sha256sum";
       };
       description = ''
-        `snbk`'s `target-<tool>-bin` overrides -- the remote-side tool
-        paths it shells out to over the ssh-push transport. Defaults
-        assume a NixOS receiver (`/run/current-system/sw/bin`); override
-        for anything else.
+        Bare tool name -> path on the RECEIVER, rendered into snbk's own
+        `target-<tool>-bin` JSON keys (the "-bin" suffix is added by this
+        module, not part of the key here). Defaults assume a NixOS
+        receiver (`/run/current-system/sw/bin`); override for anything
+        else.
       '';
     };
 

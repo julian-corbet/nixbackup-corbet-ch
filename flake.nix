@@ -356,12 +356,19 @@
               text = host.config.environment.etc."snapper/backup-configs/root.json".text;
               ok =
                 lib.strings.hasInfix "\"target-path\":\"/mnt/btrfs-backup/example-host/@\"" text
-                && lib.strings.hasInfix "\"ssh-host\":\"backup-receiver.example.org\"" text;
+                && lib.strings.hasInfix "\"ssh-host\":\"backup-receiver.example.org\"" text
+                # Regression pin: targetToolBins' default keys are bare tool names
+                # ("btrfs"), and this module appends the "target-"/"-bin" wrapping --
+                # a mismatched convention on either side doubles the suffix
+                # ("target-btrfs-bin-bin") and snbk silently never finds the key it
+                # actually wants. Caught exactly this way once already.
+                && lib.strings.hasInfix "\"target-btrfs-bin\":" text
+                && !(lib.strings.hasInfix "-bin-bin" text);
             in
             if ok then
               pkgs.runCommand "nixbackup-check-snapperbackup-json" { } "echo ok > $out"
             else
-              throw "nixbackup.snapperBackup: expected the rendered JSON's target-path to be targetPathPrefix/targetSubvolume and ssh-host to be targetHost, got:\n${text}";
+              throw "nixbackup.snapperBackup: expected the rendered JSON's target-path to be targetPathPrefix/targetSubvolume, ssh-host to be targetHost, and target-<tool>-bin keys to have no doubled -bin-bin suffix, got:\n${text}";
         });
 
       formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixpkgs-fmt);
