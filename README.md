@@ -149,7 +149,7 @@ beyond what the checks below cover until it has actually run elsewhere.
 |---|---|
 | `modules-evaluate` | all six modules compose into one NixOS system — catches type errors, failed assertions and option renames |
 | `destinations-enforce-invariants` | the generated unit pins `canmount=noauto` and `readonly=on`, compares against the **local** property source, and unmounts an already-mounted destination |
-| `monitor-min-reduces-freshness` | every snapshot listing is depth-limited, and freshness reduces across datasets by taking the **oldest** |
+| `monitor-min-reduces-freshness` | every snapshot listing is depth-limited, freshness reduces across datasets by taking the **oldest**, and the push URL composes as `<base>/<key><suffix>?<query>` with the caller's own `pushUrlSuffix` |
 | `btrbkpush-passes-through-caller-policy-verbatim` | the caller's own `snapshotPreserve`/`targetPreserve`/`incremental` reach `services.btrbk`'s settings unchanged — this module renders, it does not invent a policy |
 | `localsnapshots-retain-is-wired` | the generated script retires past the CALLER's `retain` count, not this module's own default |
 | `btrbkpull-preserves-newest-and-falls-back-to-full-send` | the newest received snapshot is never a retention candidate, and a missing shared parent degrades to a full send instead of failing outright |
@@ -263,13 +263,16 @@ needs to stamp `org.nixbackup:enabled=on` and
           nixbackup.monitor = {
             enable = true;
 
-            # REQUIRED: your push-style monitoring endpoint.
+            # REQUIRED: your push-style monitoring endpoint. Each result is
+            # POSTed to <pushUrl>/<group>_<name><pushUrlSuffix>?success=…
             pushUrl = "https://monitor.example/push";
 
             # Optional; shown here are the defaults:
             # group = "backups";
             # tokenFile = null;   # e.g. "/run/secrets/monitor-push-token"
             # interval = "6h";
+            # pushUrlSuffix = ""; # e.g. "/external" for an endpoint shaped
+            #                     # <base>/<key>/external?success=…
 
             targets = {
               # A flat tree of received btrfs snapshot subvolumes.

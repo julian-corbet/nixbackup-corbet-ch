@@ -248,7 +248,7 @@ in
       description = ''
         Base URL of a push-style monitoring endpoint. Each evaluated target
         (and each `journalChecks` entry) becomes one
-        `POST "$pushUrl/<key>?success=<true|false>&error=<url-encoded text>"`,
+        `POST "$pushUrl/<key>$pushUrlSuffix?success=<true|false>&error=<url-encoded text>"`,
         where `<key>` is `<group>_<name>`. This is a deliberately minimal,
         vendor-agnostic contract -- if your monitoring stack expects a
         different shape (a different verb, a UUID-only URL with no query
@@ -256,6 +256,27 @@ in
         and translates. See the module header ("WHY PUSH, NOT PROBE") for
         the design this assumes on the receiving side: a per-check
         heartbeat/dead-man's-switch timeout independent of this timer.
+      '';
+    };
+
+    pushUrlSuffix = lib.mkOption {
+      type = lib.types.str;
+      default = "";
+      example = "/external";
+      description = ''
+        Path appended AFTER the key and BEFORE the query string, for an
+        endpoint whose push path does not end at the key. Several
+        status dashboards shape their push API as
+        `POST <base>/<key>/external?success=...`: `pushUrl` is then the
+        base (`https://status.example/api/v1/endpoints`) and this is
+        `"/external"`. Empty (the default) yields the plain
+        `<pushUrl>/<key>?...` shape.
+
+        This exists because a key-must-be-last assumption is not a
+        cosmetic limitation -- it makes an entire common endpoint shape
+        unreachable without standing up an adapter service in front of it,
+        and an adapter is one more thing between this evaluator and the
+        dashboard that can die quietly.
       '';
     };
 
@@ -343,6 +364,7 @@ in
         export PATH=${runtimeBin}:$PATH
 
         PUSHURL=${lib.escapeShellArg cfg.pushUrl}
+        PUSHSUFFIX=${lib.escapeShellArg cfg.pushUrlSuffix}
         GROUP=${lib.escapeShellArg cfg.group}
         ${lib.optionalString (cfg.tokenFile != null) "TOKENFILE=${lib.escapeShellArg cfg.tokenFile}"}
 
@@ -368,7 +390,7 @@ in
           # request is even sent -- percent-encoding alone does not cover it.
           if curl -sf -g -m 15 -o /dev/null -X POST \
                ''${token:+-H "Authorization: Bearer $token"} \
-               "$PUSHURL/$key?success=$ok&error=$(printf '%s' "$err" | urlenc)"; then
+               "$PUSHURL/$key$PUSHSUFFIX?success=$ok&error=$(printf '%s' "$err" | urlenc)"; then
             echo "nixbackup-monitor: $name success=$ok ''${err:+($err)}"
           else
             echo "nixbackup-monitor: WARN push failed for $name (endpoint unreachable?)" >&2

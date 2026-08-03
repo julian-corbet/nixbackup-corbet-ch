@@ -204,6 +204,19 @@
                 test = ''grep -q -- '-lt "$oldest"' ./script.sh'';
                 why = "reducing by newest lets one fresh child mask a dead subtree";
               }
+              {
+                # The example host sets pushUrlSuffix = "/external", so this
+                # pins ORDER, not just presence: key, then suffix, then the
+                # query string.
+                name = "composes the push URL as <base>/<key><suffix>?<query>";
+                test = ''grep -q -- '"\$PUSHURL/\$key\$PUSHSUFFIX?success=' ./script.sh'';
+                why = "an endpoint whose push path continues past the key (…/<key>/external) is unreachable if the key is always last, and a suffix landing after the query string would be sent as part of the error text instead";
+              }
+              {
+                name = "carries the caller's own pushUrlSuffix through verbatim";
+                test = ''grep -qE "^PUSHSUFFIX='?/external'?$" ./script.sh'';
+                why = "substituting a baked-in default here would silently push every verdict at the wrong URL, which fails the same way an unreachable endpoint does -- as silence";
+              }
             ];
 
           # 4. btrbkPush is a MECHANISM, not a policy -- it must carry the

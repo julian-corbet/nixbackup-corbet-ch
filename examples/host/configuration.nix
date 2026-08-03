@@ -64,7 +64,12 @@
   # the generated script, so a check over one kind proves nothing about the rest.
   nixbackup.monitor = {
     enable = true;
-    pushUrl = "https://status.example.com/push";
+    # The key-in-the-MIDDLE push shape (<base>/<key>/external?...), so the
+    # checks below exercise a non-default pushUrlSuffix rather than only the
+    # plain <base>/<key>?... default. examples/configuration.nix shows the
+    # default shape.
+    pushUrl = "https://status.example.com/api/v1/endpoints";
+    pushUrlSuffix = "/external";
 
     targets = {
       example-leaves = {
