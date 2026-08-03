@@ -77,16 +77,39 @@
         paths = [ "example-cold/backups/host-a" "example-cold/backups/host-b" ];
         maxAgeHours = 26;
       };
+      # `cadence` (not the flat maxAgeHours fallback) on purpose: it is the
+      # only target option that renders shell ARGUMENTS rather than a literal,
+      # and it is the one the checks below actually execute.
       example-dynamic = {
         kind = "zfs-dynamic";
         scanRoot = "example-hot";
-        maxAgeHours = 26;
+        excludePatterns = [ "example-hot/scratch" ];
+        cadence = {
+          weekdays = [ "Mon" "Tue" "Wed" "Thu" "Fri" ];
+          atHour = 3;
+          atMinute = 0;
+          slackHours = 7;
+        };
       };
       example-stamp = {
         kind = "stampfile";
         paths = [ "/var/lib/example/last-verified-success" ];
         maxAgeHours = 26;
       };
+    };
+
+    # The second consumer of a cadence (its log-scan window), and the only
+    # path that resolves a target's excludePatterns to destination-side
+    # prefixes -- neither is reachable through `targets` alone.
+    journalChecks.example-journal = {
+      unit = "example-replication.service";
+      patterns = [ "cannot send" "cannot receive" ];
+      since = {
+        weekdays = [ "Mon" "Tue" "Wed" "Thu" "Fri" ];
+        atHour = 3;
+        atMinute = 0;
+      };
+      excludeDestinationsOf = "example-dynamic";
     };
   };
 

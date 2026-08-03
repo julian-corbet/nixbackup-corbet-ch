@@ -96,11 +96,24 @@ let
     };
   };
 
-  # Renders a cadenceType value to the two shell-usable strings the
-  # generated script needs: a space-separated list of ISO weekday numbers
-  # (1=Mon..7=Sun) and "HH MM slackHours".
+  # Renders a cadenceType value to the argument list `expected_run_epoch`
+  # takes: the ISO weekday numbers (1=Mon..7=Sun) as ONE argument, then a
+  # zero-padded HH and MM.
+  #
+  # The quoting is load-bearing, and its absence is invisible: unquoted,
+  # "1 2 3 4 5 3 0" word-splits into seven arguments, so the function reads
+  # dows="1", hh="2", mm="3" -- the most recent MONDAY at 02:03, for a job
+  # configured to run Mon-Fri at 03:00. Nothing errors; the deadline just
+  # silently moves up to four days into the past, and a target that stopped
+  # replicating on Tuesday keeps reporting green. Same wrong window for a
+  # journalCheck's log scan.
+  #
+  # slackHours is deliberately NOT passed: it is applied on the Nix side at
+  # each call site, and handing the function a fourth positional it ignores
+  # is how the above happened in the first place.
   cadenceIsoList = c: lib.concatMapStringsSep " " (d: toString weekdayIso.${d}) c.weekdays;
-  cadenceArgs = c: "${cadenceIsoList c} ${toString c.atHour} ${toString c.atMinute} ${toString c.slackHours}";
+  cadenceArgs = c:
+    "${lib.escapeShellArg (cadenceIsoList c)} ${lib.fixedWidthNumber 2 c.atHour} ${lib.fixedWidthNumber 2 c.atMinute}";
 
   targetType = lib.types.submodule {
     options = {
@@ -404,13 +417,15 @@ in
         }
 
         # day_at <epoch> <HH> <MM> -> epoch of that UTC calendar date at HH:MM.
+        # HH/MM arrive zero-padded from the Nix side (see cadenceArgs).
         day_at() {
           date -u -d "$(date -u -d "@$1" +%Y-%m-%d) $2:$3:00" +%s
         }
 
         # expected_run_epoch <"iso-dow iso-dow ..."> <HH> <MM> -> epoch of the
         # most recent expected run at-or-before $now, for a cadence whose
-        # weekdays are given as space-separated ISO numbers (1=Mon..7=Sun).
+        # weekdays are given as ONE space-separated argument of ISO numbers
+        # (1=Mon..7=Sun) -- quoting matters, see cadenceArgs.
         expected_run_epoch() {
           local dows="$1" hh="$2" mm="$3" cand dow d dow2
           cand=$(day_at "$now" "$hh" "$mm")

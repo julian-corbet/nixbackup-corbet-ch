@@ -217,7 +217,65 @@
                 test = ''grep -qE "^PUSHSUFFIX='?/external'?$" ./script.sh'';
                 why = "substituting a baked-in default here would silently push every verdict at the wrong URL, which fails the same way an unreachable endpoint does -- as silence";
               }
+              {
+                # Both call sites: the zfs-dynamic deadline and the
+                # journalCheck log-scan window.
+                name = "passes the cadence weekday list as ONE quoted argument, with zero-padded HH MM";
+                test = ''
+                  calls=$(grep -cF -- "=\$(expected_run_epoch " ./script.sh)
+                  wellformed=$(grep -cF -- "=\$(expected_run_epoch '1 2 3 4 5' 03 00)" ./script.sh)
+                  [ "$calls" -ge 2 ] && [ "$calls" = "$wellformed" ]'';
+                why = "unquoted, the weekday list word-splits and the function reads dows=1 hh=2 mm=3 -- a cadence nobody configured, silently, and a target that died on Tuesday still reports green";
+              }
             ];
+
+          # 3b. The cadence claim from the module header, EXECUTED rather than
+          #     grepped: a weekend evaluation compares against the last expected
+          #     WEEKDAY run and never invents a deadline on a day the job does
+          #     not run. Assertion 3's grep pins the call site's quoting; this
+          #     pins what the function itself computes, so a rewrite of the
+          #     date arithmetic that still looks right cannot pass.
+          monitor-cadence-resolves-to-the-last-expected-run =
+            pkgs.runCommand "nixbackup-check-monitor-cadence"
+              {
+                script = units.nixbackup-monitor.script;
+                passAsFile = [ "script" ];
+              }
+              ''
+                cp "$scriptPath" ./script.sh
+                sed -n '/^day_at()/,/^}/p;/^expected_run_epoch()/,/^}/p' ./script.sh > ./helpers.sh
+                . ./helpers.sh
+
+                fail=0
+                # case <label> <evaluation moment, UTC> <expected run, UTC>
+                case_is() {
+                  now=$(date -u -d "$2" +%s)
+                  got=$(expected_run_epoch '1 2 3 4 5' 03 00)
+                  want=$(date -u -d "$3" +%s)
+                  if [ "$got" = "$want" ]; then
+                    echo "ok   — $1"
+                  else
+                    echo "FAIL — $1: evaluating at $2 resolved to $(date -u -d "@$got"), wanted $3" >&2
+                    fail=1
+                  fi
+                }
+
+                # Sunday noon: Friday's run, not a phantom Saturday/Sunday one.
+                case_is "a weekend evaluation looks back to Friday" \
+                  "2026-08-02 12:00:00" "2026-07-31 03:00:00"
+                # Wednesday, before today's run is due: Tuesday's, not today's.
+                case_is "before the day's run is due, the previous run counts" \
+                  "2026-07-29 02:00:00" "2026-07-28 03:00:00"
+                # Wednesday, after it is due: today's.
+                case_is "after the day's run is due, today's run counts" \
+                  "2026-07-29 04:00:00" "2026-07-29 03:00:00"
+                # Exactly at the run time: today's (>=, not >).
+                case_is "the run minute itself already counts as today's run" \
+                  "2026-07-29 03:00:00" "2026-07-29 03:00:00"
+
+                [ "$fail" -eq 0 ] || exit 1
+                echo "cadence resolves correctly" > $out
+              '';
 
           # 4. btrbkPush is a MECHANISM, not a policy -- it must carry the
           #    caller's own retention strings through to `services.btrbk`

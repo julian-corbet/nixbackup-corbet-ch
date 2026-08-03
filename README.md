@@ -149,7 +149,8 @@ beyond what the checks below cover until it has actually run elsewhere.
 |---|---|
 | `modules-evaluate` | all six modules compose into one NixOS system — catches type errors, failed assertions and option renames |
 | `destinations-enforce-invariants` | the generated unit pins `canmount=noauto` and `readonly=on`, compares against the **local** property source, and unmounts an already-mounted destination |
-| `monitor-min-reduces-freshness` | every snapshot listing is depth-limited, freshness reduces across datasets by taking the **oldest**, and the push URL composes as `<base>/<key><suffix>?<query>` with the caller's own `pushUrlSuffix` |
+| `monitor-min-reduces-freshness` | every snapshot listing is depth-limited, freshness reduces across datasets by taking the **oldest**, the push URL composes as `<base>/<key><suffix>?<query>` with the caller's own `pushUrlSuffix`, and every cadence call passes its weekday list as one quoted argument |
+| `monitor-cadence-resolves-to-the-last-expected-run` | **executes** the generated cadence arithmetic: a weekend evaluation resolves to Friday's run, a pre-run-hour evaluation to the previous run, and the run minute itself already counts as today's |
 | `btrbkpush-passes-through-caller-policy-verbatim` | the caller's own `snapshotPreserve`/`targetPreserve`/`incremental` reach `services.btrbk`'s settings unchanged — this module renders, it does not invent a policy |
 | `localsnapshots-retain-is-wired` | the generated script retires past the CALLER's `retain` count, not this module's own default |
 | `btrbkpull-preserves-newest-and-falls-back-to-full-send` | the newest received snapshot is never a retention candidate, and a missing shared parent degrades to a full send instead of failing outright |
