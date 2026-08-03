@@ -9,7 +9,7 @@
 # `.timer` are the only thing available, and where system-manager has no access to
 # nixpkgs' own snapper module (same reasoning nixbackup's `btrbkPush` avoided for
 # system-manager -- see this repo's README, "Deliberately out of scope"). Extracted
-# and generalized from CORBET-ELITEBOOK's real, live setup (verified 2026-08-01) --
+# and generalized from a real Arch/CachyOS laptop's real, live setup (verified 2026-08-01) --
 # the two incidents below are what actually happened there, not hypotheticals.
 #
 # WHY A DROP-IN, NOT A FULL UNIT REWRITE: `snbk`'s scheduling comes from the
