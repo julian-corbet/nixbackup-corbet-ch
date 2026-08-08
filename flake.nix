@@ -402,6 +402,41 @@
             else
               throw "nixbackup.snapperBackup.{targetHost,targetPathPrefix,sshIdentityFile}: expected omitting them to fail the build and supplying them to succeed, got missing=${toString missing} present=${toString present}";
 
+          # 8b. snapperBackup.distro: the config-template package a derivative
+          #     ships is published for that derivative and for NOBODY else. Both
+          #     directions are asserted, and the ABSENT one is the load-bearing
+          #     half: a derivative-only name exists in no upstream Arch repo and
+          #     in no AUR, and `pacman -S` aborts the ENTIRE transaction on one
+          #     unknown target -- so a leak onto the default would not merely
+          #     install the wrong package, it would fail every OTHER package a
+          #     consuming host declared. Read WITHOUT `enable`, deliberately:
+          #     `archPackages` is defined outside the module's `mkIf` so a
+          #     consumer can wire it into a reconciler unconditionally.
+          snapperbackup-distro-gates-the-template-package =
+            let
+              archPkgsFor = distro: (lib.nixosSystem {
+                inherit system;
+                modules = [
+                  ./modules/snapper-backup.nix
+                  { nixbackup.snapperBackup.distro = distro; }
+                  bareStubs
+                ];
+              }).config.nixbackup.snapperBackup.archPackages;
+              onArch = archPkgsFor "arch";
+              onCachyos = archPkgsFor "cachyos";
+              # A typo in a free-form value would resolve to "publish nothing" and be invisible;
+              # the enum is what turns it into an evaluation failure instead. Forced through
+              # `archPackages` rather than `system.build.toplevel`, deliberately: nothing in a
+              # bare toplevel consumes this option, so an unforced type constraint is no
+              # constraint at all -- the check has to read the value it claims is protected.
+              typoRejected = !(builtins.tryEval
+                (builtins.seq (archPkgsFor "cachyOS") true)).success;
+            in
+            if onArch == [ ] && onCachyos == [ "cachyos-snapper-support" ] && typoRejected then
+              pkgs.runCommand "nixbackup-check-snapperbackup-distro" { } "echo ok > $out"
+            else
+              throw "nixbackup.snapperBackup.distro: expected arch=[] and cachyos=[\"cachyos-snapper-support\"] with a typo rejected, got arch=${builtins.toJSON onArch} cachyos=${builtins.toJSON onCachyos} typoRejected=${lib.boolToString typoRejected}";
+
           # 9. The module's own header explains WHY the drop-in leads with an
           #    empty OnCalendar=: systemd ADDS repeated keys instead of
           #    replacing them, so without the clear-first line, a future

@@ -182,9 +182,77 @@ in
         snbk fails ("Unknown config") on the mismatch.
       '';
     };
+
+    # ── The distro's own snapper config templates ────────────────────────────────────────────
+    #
+    # WHY THIS BELONGS TO nixbackup AND NOT TO A PLATFORM REPO. The package a derivative ships
+    # here contains exactly one thing: a snapper CONFIG TEMPLATE, the file `snapper -c <name>
+    # create-config` copies when a new config is created. That is not distro identity, branding or
+    # platform plumbing -- its whole subject is snapper's own configuration, and on a host where
+    # snapper is genuinely live (real configs, real timers, this module's own reapply unit) the
+    # snapshot subject already belongs here. A template is a seed for that subject, so it is
+    # declared beside it.
+    #
+    # DECLARED, NEVER DETECTED -- the same stance, and for the same reason, that every other
+    # `distro`-shaped option in this family takes (nixarch's `nixarch.packages.distro`, nixmsg's
+    # `nixmsg.distro`, nixgames's `nixgames.distro`; each repo declares its OWN, none of them
+    # reaches into another's namespace). A module is evaluated wherever the flake is built, which
+    # is not necessarily the machine it targets, so probing `/etc/os-release` here would as often
+    # as not read the wrong host's identity.
+    #
+    # AN ENUM, NOT A FREE STRING, AND THAT IS THE WHOLE SAFETY MECHANISM. A derivative's package
+    # exists ONLY in that derivative's own repositories -- not in upstream Arch, not in the AUR --
+    # and `pacman -S` aborts the ENTIRE transaction on one unknown target, taking every other
+    # package a host declared down with it. A closed enum means a name can only ever be published
+    # for a distro this module actually knows carries it, and a typo fails evaluation instead of
+    # failing a reconcile. The default is the one answer that publishes nothing.
+    distro = lib.mkOption {
+      type = lib.types.enum [ "arch" "cachyos" ];
+      default = "arch";
+      example = "cachyos";
+      description = ''
+        Which Arch-family distribution this host runs, for the sole purpose of declaring that
+        distro's snapper config-template package (if it has one).
+
+        `"arch"`, the default, publishes nothing: upstream Arch's `snapper` package ships its own
+        templates and needs no companion. `"cachyos"` publishes `cachyos-snapper-support`, whose
+        entire content is `/etc/snapper/config-templates/cachyos-root` -- the template used when
+        CREATING a new snapper config, tuned for that distro's btrfs layout. It changes nothing
+        about configs that already exist.
+
+        Declared rather than detected, and a closed enum rather than a free string; see this
+        option's own comment in modules/snapper-backup.nix for both reasons.
+      '';
+    };
+
+    archPackages = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      readOnly = true;
+      description = ''
+        READ-ONLY, computed from `distro`: official Arch-family package names this module wants
+        installed. nixbackup publishes intent rather than invoking a package manager -- a
+        system-manager host wires this into its own reconciler, for example
+        `nixarch.packages.pacman = config.nixbackup.snapperBackup.archPackages`.
+
+        Empty on `distro = "arch"`, so a host that wires it unconditionally is correct on every
+        Arch-family box rather than only on the one that has something to install.
+      '';
+    };
   };
 
-  config = lib.mkIf cfg.enable {
+  # `mkMerge` rather than one `mkIf`, for `archPackages`' sake: it carries NO `default` and is
+  # defined unconditionally in the first branch, because `readOnly` permits exactly one definition
+  # and a default plus a guarded definition counts as two. Reading the resolved package list
+  # without enabling the backup machinery is a legitimate thing for a consumer to do anyway.
+  config = lib.mkMerge [
+    {
+      nixbackup.snapperBackup.archPackages = {
+        arch = [ ];
+        cachyos = [ "cachyos-snapper-support" ];
+      }.${cfg.distro};
+    }
+
+    (lib.mkIf cfg.enable {
     environment.etc =
       (lib.mapAttrs'
         (name: b: lib.nameValuePair "snapper/backup-configs/${name}.json" ({
@@ -229,5 +297,6 @@ in
         ExecStartPost = "/usr/bin/systemctl restart snapper-backup.timer";
       };
     };
-  };
+    })
+  ];
 }
