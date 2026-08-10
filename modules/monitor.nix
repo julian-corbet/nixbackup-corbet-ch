@@ -586,7 +586,17 @@ in
                   zrel="''${src_ds#"$zroot"}"
                   zdst_ds="$zdst$zrel"
                   zfs list -H -o name "$zdst_ds" >/dev/null 2>&1 || fail="$fail $zdst_ds(missing-on-dest)"
-                done < <(zfs list -H -o name -r "$zroot" 2>/dev/null | tail -n +2)
+                  # NO `tail -n +2`. `zfs list -r` emits the ROOT first, so dropping line 1 makes
+                  # this check blind to the plan root itself: when the destination ROOT is what is
+                  # missing, every child is missing too, and the alarm names an arbitrary CHILD as
+                  # the fault. That sends the reader looking for a problem with the child, when the
+                  # thing that has to be created is its parent — the root is the cause, the
+                  # children are the symptom. Reporting a symptom as a cause is worse than
+                  # reporting nothing, because it is actionable in the wrong direction.
+                  #
+                  # `zrel` is empty for the root, so `zdst_ds` is exactly `$zdst`, which is the
+                  # dataset a human then has to create.
+                done < <(zfs list -H -o name -r "$zroot" 2>/dev/null)
 
                 # ── freshness: MIN over every LEAF actually present at dest
                 # (not just the named roots -- a stalled grandchild must not
