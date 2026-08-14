@@ -245,6 +245,50 @@ let
           paths, are filtered out of matched journal lines before they count
           as a failure here -- so a KNOWN, already-accepted exclusion cannot
           permanently redden this check on every single run.
+
+          Resolution walks the excluded pattern's own ancestry for
+          `destinationProperty` (inherited values count). It therefore yields
+          nothing when no ancestor carries that property at all -- which is
+          the normal state once the excluded subtree is no longer under any
+          declared plan. Name those destinations literally in
+          `excludeDestinations` instead; the two lists are unioned.
+        '';
+      };
+
+      excludeDestinations = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [ "pool/backups/thing/placeholders" ];
+        description = ''
+          Destination paths whose failures are a KNOWN, ACCEPTED condition,
+          named literally rather than derived from live dataset properties.
+
+          Matching is anchored on a path boundary: the value must be followed
+          by `/`, a quote, a separator, or end-of-line, so `pool/b/clouds`
+          cannot also silence the unrelated sibling `pool/b/cloudsync`.
+
+          Use when the destination cannot be derived -- typically because the
+          excluded source subtree carries no plan properties any more, so
+          there is nothing left on disk to resolve it from.
+        '';
+      };
+
+      excludeCondition = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "does not exist or is offline";
+        description = ''
+          ERE naming the ONE failure condition that is accepted for the
+          excluded destinations. A line is suppressed only when it BOTH names
+          an excluded destination AND matches this -- required whenever any
+          exclusion is configured.
+
+          Excluding on the destination alone is not safe: it suppresses every
+          failure that destination will ever produce, including the ones that
+          mean something is now genuinely broken. The moment a deliberately
+          absent destination is created, "cannot receive"/"out of space"
+          against it are real -- and a destination-only rule would swallow
+          exactly those, reporting a dead subtree as green forever.
         '';
       };
     };
@@ -350,6 +394,15 @@ in
         assertion = cfg.targets != { } || cfg.journalChecks != { };
         message = "nixbackup.monitor.enable is true but both `targets` and `journalChecks` are empty -- there is nothing to evaluate.";
       }
+    ] ++ (lib.mapAttrsToList (name: jc: {
+      # Suppressing on the destination alone silences that destination's FUTURE
+      # real failures too, which is precisely a false green. Naming the accepted
+      # condition is what keeps the suppression narrow, so it is required rather
+      # than defaulted -- a default here would be a silent security-of-signal
+      # decision made on the operator's behalf.
+      assertion = (jc.excludeDestinations == [ ] && jc.excludeDestinationsOf == null) || jc.excludeCondition != null;
+      message = "nixbackup.monitor.journalChecks.${name} configures an exclusion but leaves `excludeCondition` null -- set the ERE naming the ONE accepted failure condition (e.g. \"does not exist or is offline\"), or the exclusion will also swallow genuinely new failures against the same destination.";
+    }) cfg.journalChecks) ++ [
     ] ++ (lib.mapAttrsToList
       (name: t: {
         assertion = t.kind != "zfs-dynamic" || t.scanRoot != "";
@@ -658,29 +711,154 @@ in
           (
             jc_excl=()
             ${lib.optionalString (jc.excludeDestinationsOf != null) ''
-              mapfile -t jc_roots < <(zfs get -s local -Ho name,value ${lib.escapeShellArg (cfg.targets.${jc.excludeDestinationsOf}.enabledProperty)} -r ${lib.escapeShellArg (cfg.targets.${jc.excludeDestinationsOf}.scanRoot)} 2>/dev/null | awk '$2=="on"{print $1}')
+              # Walk the excluded pattern's OWN ancestry for the destination property, taking
+              # inherited values -- do not require the ancestor to be an enabled plan root. An
+              # excluded subtree is frequently a sibling of every declared root (or sits under a
+              # source that stopped being declared), in which case no enabled root is an ancestor
+              # of it and the old root-scan resolved nothing at all.
               for jc_pat in ${lib.escapeShellArgs (cfg.targets.${jc.excludeDestinationsOf}.excludePatterns or [ ])}; do
-                for jc_root in "''${jc_roots[@]:-}"; do
-                  [ -z "$jc_root" ] && continue
-                  case "$jc_pat" in
-                    "$jc_root"|"$jc_root"/*)
-                      jc_dst=$(zfs get -Ho value ${lib.escapeShellArg (cfg.targets.${jc.excludeDestinationsOf}.destinationProperty)} "$jc_root" 2>/dev/null)
-                      if [ -n "$jc_dst" ] && [ "$jc_dst" != "-" ]; then
-                        jc_excl+=("$jc_dst''${jc_pat#"$jc_root"}")
-                      fi
-                      break
-                      ;;
+                jc_node="$jc_pat"
+                while [ -n "$jc_node" ]; do
+                  jc_dst=$(zfs get -Ho value ${lib.escapeShellArg (cfg.targets.${jc.excludeDestinationsOf}.destinationProperty)} "$jc_node" 2>/dev/null)
+                  if [ -n "$jc_dst" ] && [ "$jc_dst" != "-" ]; then
+                    jc_excl+=("$jc_dst''${jc_pat#"$jc_node"}")
+                    break
+                  fi
+                  case "$jc_node" in
+                    */*) jc_node="''${jc_node%/*}" ;;
+                    *)   jc_node="" ;;
                   esac
                 done
               done
             ''}
+            ${lib.optionalString (jc.excludeDestinations != [ ]) ''
+              jc_excl+=(${lib.escapeShellArgs jc.excludeDestinations})
+            ''}
+            # Two-part filter, deliberately narrow in three separate ways, because every widening
+            # of it is a false green -- a broken backup reported as a working one.
+            #
+            # Per-LINE, a line is suppressed only when it BOTH names an excluded destination on a
+            # path boundary AND matches the accepted condition. Destination alone is not enough:
+            # the day an intentionally-absent destination gets created, "cannot receive" and "out
+            # of space" against it are real, and a destination-only rule would swallow exactly
+            # those. The boundary stops `.../clouds` from also silencing `.../cloudsync`, and stops
+            # a short value from matching the hostname field and silencing the whole unit.
+            #
+            # Per-GROUP, a run-level summary ("suspending cleanup source dataset X because N send
+            # task(s) failed:") names the SOURCE, never a destination, so no per-line rule can ever
+            # reach it -- left alone it reddens the check forever on an already-accepted exclusion.
+            # It is dropped ONLY when the number of detail lines actually seen equals the N the
+            # summary itself claims AND every one of them was accepted. Counting matters: journald
+            # rate-limiting ("Suppressed N messages"), log rotation, or the scan window's own start
+            # can cut a burst of details in half, and "all the details I happened to see were
+            # accepted" would then hide the ones that were not. Groups are keyed by PID because
+            # backup sets run concurrently and another set's output interleaves freely.
             jc_filter() {
               if [ "''${#jc_excl[@]}" -eq 0 ]; then
                 cat
               else
-                local pat
-                pat=$(printf '%s\n' "''${jc_excl[@]}")
-                grep -vF "$pat"
+                JC_EXCL=$(printf '%s\n' "''${jc_excl[@]}") \
+                JC_COND=${lib.escapeShellArg (toString jc.excludeCondition)} awk '
+                  # JC_FILTER_AWK_BEGIN (checks/ extracts between these markers and RUNS it)
+                  BEGIN {
+                    n = split(ENVIRON["JC_EXCL"], raw, "\n")
+                    for (i = 1; i <= n; i++) if (raw[i] != "") excl[++m] = raw[i]
+                    cond = ENVIRON["JC_COND"]
+                    # Built from char codes: the whole program is inside a single-quoted shell
+                    # word, so a literal quote cannot appear in it.
+                    sq = sprintf("%c", 39); dq = sprintf("%c", 34)
+                    qre = sq "[^" sq "]*" sq "|" dq "[^" dq "]*" dq
+                  }
+                  # Whole-path containment, never substring: p is e, or p sits under e/.
+                  function under(p, e) {
+                    return (p == e) || (substr(p, 1, length(e) + 1) == e "/")
+                  }
+                  # The destinations a line is ABOUT are its quoted path-like tokens. Comparing
+                  # whole TOKENS, rather than searching the line for a substring, is what makes
+                  # this safe. A substring search has no left edge, so an excluded "pool/x" also
+                  # matches inside "bigpool/x"; and it cannot tell which destination the line is
+                  # actually about, so an excluded path mentioned anywhere would launder an
+                  # unrelated one named in the same line. Every quoted path must be excluded --
+                  # one unexcluded path and the line stands. A line quoting no path at all cannot
+                  # be judged, so it is never suppressed.
+                  function all_paths_excluded(s,   rest, tok, i, hit, ok) {
+                    npaths = 0; ok = 1; rest = s
+                    while (match(rest, qre)) {
+                      tok = substr(rest, RSTART + 1, RLENGTH - 2)
+                      rest = substr(rest, RSTART + RLENGTH)
+                      if (index(tok, "/") == 0) continue
+                      npaths++; hit = 0
+                      for (i = 1; i <= m; i++) if (under(tok, excl[i])) { hit = 1; break }
+                      if (!hit) ok = 0
+                    }
+                    return (npaths > 0 && ok)
+                  }
+                  function cond_count(s,   rest, c) {
+                    c = 0; rest = s
+                    while (match(rest, cond)) {
+                      c++
+                      if (RLENGTH <= 0) break
+                      rest = substr(rest, RSTART + RLENGTH)
+                    }
+                    return c
+                  }
+                  # Three requirements, never any subset. The third is the tokenizer's own
+                  # honesty check: it can only see paths that are quoted and contain a slash, so
+                  # a second destination on the line that is unquoted, is a bare pool name, or
+                  # had its quotes re-paired by an apostrophe in prose, is INVISIBLE -- and
+                  # invisible must never read as excluded. One accepted condition per path the
+                  # tokenizer actually saw; any surplus means the line describes something it
+                  # could not account for, so it stands.
+                  function accepted(s) {
+                    return (cond != "") && (s ~ cond) && all_paths_excluded(s) \
+                           && (cond_count(s) == npaths)
+                  }
+                  function pidof(s) {
+                    if (match(s, /\[[0-9]+\]:/)) return substr(s, RSTART + 1, RLENGTH - 3)
+                    return "-"
+                  }
+                  function flush(p,   drop) {
+                    if (!(p in hold)) return
+                    drop = (want[p] > 0 && seen[p] == want[p] && allacc[p])
+                    if (!drop) { print hold[p]; printf "%s", buf[p] }
+                    delete hold[p]; delete buf[p]; delete allacc[p]; delete seen[p]; delete want[p]
+                  }
+                  # A group lives only across a CONTIGUOUS run of summary and detail lines. PID
+                  # alone cannot bound it: PIDs are recycled, and a group held open to EOF will
+                  # happily adopt detail lines emitted hours later by an unrelated process that
+                  # reused the number -- and if the count happens to match, drop on them. Any
+                  # other line at all closes every open group, so adoption cannot reach across
+                  # the ordinary output that separates two runs.
+                  function flushall(   i, k, keys) {
+                    k = 0
+                    for (q in hold) keys[++k] = q
+                    for (i = 1; i <= k; i++) flush(keys[i])
+                  }
+                  {
+                    p = pidof($0)
+                    if (match($0, /because [0-9]+ send task\(s\) failed/)) {
+                      # flushALL, not just this PID: a summary closing only its own group lets an
+                      # older group survive arbitrary other-PID traffic and later adopt a detail
+                      # line from a recycled PID. A run's summary and its details are contiguous,
+                      # so the cost of this is at worst a summary reported that could have been
+                      # suppressed -- a false RED, which is the safe direction to be wrong in.
+                      flushall()
+                      w = substr($0, RSTART + 8, RLENGTH - 8)
+                      sub(/ send task.*/, "", w)
+                      hold[p] = $0; buf[p] = ""; allacc[p] = 1; seen[p] = 0; want[p] = w + 0
+                      next
+                    }
+                    if ((p in hold) && $0 ~ /\+-->/) {
+                      seen[p]++
+                      if (!accepted($0)) { allacc[p] = 0; buf[p] = buf[p] $0 "\n" }
+                      next
+                    }
+                    flushall()
+                    if (!accepted($0)) print
+                  }
+                  END { flushall() }
+                  # JC_FILTER_AWK_END
+                '
               fi
             }
 

@@ -277,6 +277,120 @@
                 echo "cadence resolves correctly" > $out
               '';
 
+          # 3c. The journal filter's suppression rule, EXECUTED. A false green is
+          #     the worst failure this module can produce -- it reports a broken
+          #     backup as a working one -- so the awk is extracted from the
+          #     generated script and RUN against fixtures rather than grepped for
+          #     shape. A run-level summary names the SOURCE, so no substring rule
+          #     can reach it; it may only be dropped when every detail line under
+          #     it is an accepted destination, and never when there are none.
+          monitor-journal-filter-suppresses-only-accepted-failures =
+            pkgs.runCommand "nixbackup-check-monitor-journal-filter"
+              {
+                script = units.nixbackup-monitor.script;
+                passAsFile = [ "script" ];
+              }
+              ''
+                cp "$scriptPath" ./script.sh
+                sed -n '/JC_FILTER_AWK_BEGIN/,/JC_FILTER_AWK_END/p' ./script.sh > ./filter.awk
+                [ -s ./filter.awk ] || { echo "FAIL — could not extract the filter awk from the generated script" >&2; exit 1; }
+
+                export JC_EXCL="pool/backups/example/placeholders"
+                export JC_COND="does not exist or is offline"
+                fail=0
+                expect() {
+                  label="$1"; want="$2"; shift 2
+                  got=$(printf '%s\n' "$@" | ${pkgs.gawk}/bin/awk -f ./filter.awk | grep -c . || true)
+                  if [ "$got" = "$want" ]; then
+                    echo "ok   — $label"
+                  else
+                    echo "FAIL — $label: $got line(s) survived, wanted $want" >&2
+                    fail=1
+                  fi
+                }
+
+                SUM="Aug 14 05:04:55 h znapzend[999]: ERROR: suspending cleanup source dataset pool/thing because 2 send task(s) failed:"
+                ACC="Aug 14 05:04:55 h znapzend[999]:  +-->   sub-destination 'pool/backups/example/placeholders/a' does not exist or is offline"
+                ACC2="Aug 14 05:04:55 h znapzend[999]:  +-->   sub-destination 'pool/backups/example/placeholders/b' does not exist or is offline"
+                REAL="Aug 14 05:04:55 h znapzend[999]:  +-->   sub-destination 'pool/backups/real/dbs' does not exist or is offline"
+
+                expect "an all-accepted, fully-observed group is dropped whole" 0 "$SUM" "$ACC" "$ACC2"
+                expect "one unaccepted detail keeps the summary AND that detail" 2 "$SUM" "$ACC" "$REAL"
+                expect "a summary with no detail lines is never dropped" 1 "$SUM"
+                expect "a standalone failure is untouched" 1 \
+                  "Aug 14 05:04:55 h znapzend[777]: cannot receive incremental stream for pool/backups/real/dbs"
+                # A later summary closes every open group. Being wrong here costs a summary that
+                # could have been suppressed -- a false RED, the safe direction.
+                expect "a later summary closes an earlier open group" 3 \
+                  "Aug 14 05:04:55 h znapzend[111]: ERROR: suspending cleanup source dataset pool/a because 1 send task(s) failed:" \
+                  "Aug 14 05:04:55 h znapzend[222]: ERROR: suspending cleanup source dataset pool/b because 1 send task(s) failed:" \
+                  "Aug 14 05:04:55 h znapzend[111]:  +-->   sub-destination 'pool/backups/example/placeholders/a' does not exist or is offline" \
+                  "Aug 14 05:04:55 h znapzend[222]:  +-->   sub-destination 'pool/backups/real/steam' does not exist or is offline"
+
+                # ── The three false-green paths an adversarial review found. Each of these
+                #    passed the destination-only, count-free version of this filter. ──
+
+                # 1. Accepted DESTINATION, unaccepted CONDITION. This is what a deliberately
+                #    absent destination looks like the day it exists and starts failing for real.
+                expect "a real failure ON an excluded destination still counts" 1 \
+                  "Aug 14 05:04:55 h znapzend[999]:  +-->   cannot receive into 'pool/backups/example/placeholders/a': destination has been modified"
+
+                # 2. Sibling whose name merely starts with the excluded path.
+                expect "an excluded path does not silence a longer sibling name" 1 \
+                  "Aug 14 05:04:55 h znapzend[999]: cannot send to 'pool/backups/example/placeholdersync/prod': I/O error"
+
+                # 3. journald rate-limiting / rotation / the window's own start can truncate a
+                #    burst of details. Only the ones that survived were accepted -- that says
+                #    nothing about the ones that did not.
+                expect "fewer details than the summary claims keeps the summary" 1 "$SUM" "$ACC"
+
+                # 4. No left edge on a substring search: an excluded "pool/..." also matches
+                #    inside "bigpool/...", silencing a different pool entirely.
+                expect "an excluded path inside a LONGER pool name is not excluded" 2 \
+                  "Aug 14 05:04:55 h znapzend[555]: ERROR: suspending cleanup source dataset pool/vital because 1 send task(s) failed:" \
+                  "Aug 14 05:04:55 h znapzend[555]:  +-->   sub-destination 'bigpool/backups/example/placeholders/vital' does not exist or is offline"
+
+                # 5. Co-occurrence: the excluded path appears on the line, but the destination the
+                #    line is ABOUT is a different, unexcluded one.
+                expect "an excluded path mentioned elsewhere cannot launder another destination" 1 \
+                  "Aug 14 05:04:55 h znapzend[555]: while replicating 'pool/backups/example/placeholders', sub-destination 'pool/backups/vital' does not exist or is offline"
+
+                # 6. PID reuse. A group held open to end-of-stream adopts a detail line emitted
+                #    hours later by a recycled PID; if the count lines up, it drops on it.
+                expect "a group cannot adopt details across intervening output" 2 \
+                  "Aug 14 05:04:55 h znapzend[868761]: ERROR: suspending cleanup source dataset pool/vital because 1 send task(s) failed:" \
+                  "Aug 14 11:00:00 h znapzend[868761]: done with backupset pool/other in 3 seconds" \
+                  "Aug 14 17:41:02 h znapzend[868761]:  +-->   sub-destination 'pool/backups/example/placeholders/az' does not exist or is offline"
+
+                # 7. …nor across nothing but OTHER runs' summaries and details, where no ordinary
+                #    line ever appears to close it. Exactly one line survives: the stale summary,
+                #    refusing to be satisfied by a later run's detail. The interposed run is
+                #    complete and fully accepted, so it is correctly dropped, and the orphaned
+                #    detail is an accepted line in its own right.
+                expect "a group cannot adopt details across other runs alone" 1 \
+                  "Aug 14 05:04:55 h znapzend[868761]: ERROR: suspending cleanup source dataset pool/vital because 1 send task(s) failed:" \
+                  "Aug 14 09:00:00 h znapzend[999111]: ERROR: suspending cleanup source dataset pool/other because 1 send task(s) failed:" \
+                  "Aug 14 09:00:00 h znapzend[999111]:  +-->   sub-destination 'pool/backups/example/placeholders/a' does not exist or is offline" \
+                  "Aug 14 17:41:02 h znapzend[868761]:  +-->   sub-destination 'pool/backups/example/placeholders/c' does not exist or is offline"
+
+                # 8-10. The tokenizer can only see paths that are QUOTED and contain a slash. A
+                #       second destination it cannot see must never be read as excluded.
+                expect "an apostrophe in prose cannot swallow a following real path" 2 \
+                  "Aug 14 05:04:55 h znapzend[868761]: ERROR: suspending cleanup source dataset pool/x because 1 send task(s) failed:" \
+                  "Aug 14 05:04:55 h znapzend[868761]:  +--> sub-destination 'pool/backups/example/placeholders/a' does not exist or is offline; the pool's mirror 'pool/backups/vital' does not exist or is offline"
+
+                expect "an UNQUOTED second destination is not read as excluded" 2 \
+                  "Aug 14 05:04:55 h znapzend[868761]: ERROR: suspending cleanup source dataset pool/x because 1 send task(s) failed:" \
+                  "Aug 14 05:04:55 h znapzend[868761]:  +--> sub-destination 'pool/backups/example/placeholders/a' does not exist or is offline; pool/backups/vital does not exist or is offline"
+
+                expect "a bare pool root alongside an excluded path is not read as excluded" 2 \
+                  "Aug 14 05:04:55 h znapzend[868761]: ERROR: suspending cleanup source dataset pool/x because 1 send task(s) failed:" \
+                  "Aug 14 05:04:55 h znapzend[868761]:  +--> sub-destination 'pool/backups/example/placeholders/a' does not exist or is offline; 'tank' does not exist or is offline"
+
+                [ "$fail" -eq 0 ] || exit 1
+                echo "filter suppresses only accepted failures" > $out
+              '';
+
           # 4. btrbkPush is a MECHANISM, not a policy -- it must carry the
           #    caller's own retention strings through to `services.btrbk`
           #    verbatim, never substitute a baked-in default of its own

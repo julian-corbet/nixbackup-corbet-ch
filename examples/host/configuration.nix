@@ -110,6 +110,14 @@
         atMinute = 0;
       };
       excludeDestinationsOf = "example-dynamic";
+      # Named literally because a subtree that is no longer under any declared
+      # plan carries no destination property to resolve from -- the derived
+      # list would silently come back empty. Both lists are unioned.
+      excludeDestinations = [ "pool/backups/example/placeholders" ];
+      # The ONE condition that is accepted for those destinations. Required:
+      # without it the exclusion would also swallow a real failure against the
+      # same path the day it stops being absent.
+      excludeCondition = "does not exist or is offline";
     };
   };
 
