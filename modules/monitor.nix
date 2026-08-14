@@ -802,8 +802,8 @@ in
                     }
                     return c
                   }
-                  # Three requirements, never any subset. The third is the tokenizer's own
-                  # honesty check: it can only see paths that are quoted and contain a slash, so
+                  # Three requirements, never any subset. The third is an honesty check on the
+                  # tokenizer: it can only see paths that are quoted and contain a slash, so
                   # a second destination on the line that is unquoted, is a bare pool name, or
                   # had its quotes re-paired by an apostrophe in prose, is INVISIBLE -- and
                   # invisible must never read as excluded. One accepted condition per path the
@@ -839,7 +839,7 @@ in
                     if (match($0, /because [0-9]+ send task\(s\) failed/)) {
                       # flushALL, not just this PID: a summary closing only its own group lets an
                       # older group survive arbitrary other-PID traffic and later adopt a detail
-                      # line from a recycled PID. A run's summary and its details are contiguous,
+                      # line from a recycled PID. The summary and details of one run are contiguous,
                       # so the cost of this is at worst a summary reported that could have been
                       # suppressed -- a false RED, which is the safe direction to be wrong in.
                       flushall()

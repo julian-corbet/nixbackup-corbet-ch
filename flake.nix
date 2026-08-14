@@ -292,6 +292,20 @@
               }
               ''
                 cp "$scriptPath" ./script.sh
+
+                # FIRST, before anything clever: is the generated script even valid shell? The
+                # awk program is embedded in a single-quoted shell word, so one apostrophe in an
+                # awk COMMENT ends that word and the rest of the program is parsed as shell.
+                # Extracting the awk and running it in isolation cannot see this -- the awk stays
+                # perfectly valid while the script around it is broken.
+                if ${pkgs.bash}/bin/bash -n ./script.sh 2>./shellerr; then
+                  echo "ok   — the generated script is valid shell"
+                else
+                  echo "FAIL — the generated script is not valid shell" >&2
+                  cat ./shellerr >&2
+                  exit 1
+                fi
+
                 sed -n '/JC_FILTER_AWK_BEGIN/,/JC_FILTER_AWK_END/p' ./script.sh > ./filter.awk
                 [ -s ./filter.awk ] || { echo "FAIL — could not extract the filter awk from the generated script" >&2; exit 1; }
 
