@@ -890,10 +890,16 @@ in
       description = "Periodic backup freshness/integrity evaluation → monitoring endpoint";
       wantedBy = [ "timers.target" ];
       timerConfig = {
-        OnBootSec = "10min";
+        # Establish the first deadline from THIS timer activation, not from
+        # the machine's boot timestamp. A timer may be activated more than
+        # 10 minutes after boot (late target convergence, a rebuild, or a
+        # daemon-reload); OnBootSec is already behind it then. With no
+        # service activation in the current boot, OnUnitActiveSec has no
+        # current-boot baseline and the timer can remain active(elapsed)
+        # forever. OnActiveSec always seeds that baseline.
+        OnActiveSec = "10min";
         OnUnitActiveSec = cfg.interval;
         RandomizedDelaySec = "5min";
-        Persistent = true;
       };
     };
   };

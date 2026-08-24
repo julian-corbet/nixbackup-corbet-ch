@@ -228,9 +228,12 @@ in
       description = "Periodic replication-destination auto-bootstrap (autoCreation workaround)";
       wantedBy = [ "timers.target" ];
       timerConfig = {
-        OnBootSec = "15min";
+        # Seed the interval from this timer's activation. A boot-relative
+        # deadline can already be in the past when the unit first appears
+        # after target convergence or a rebuild, leaving no current-boot
+        # service activation for OnUnitActiveSec to follow.
+        OnActiveSec = "15min";
         OnUnitActiveSec = cfg.interval;
-        Persistent = true;
         RandomizedDelaySec = "5min";
       };
     };

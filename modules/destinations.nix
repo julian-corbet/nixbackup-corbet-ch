@@ -95,9 +95,9 @@ in
       description = ''
         How often the enforcement oneshot re-asserts the invariant
         (`OnUnitActiveSec`). It also runs once shortly after boot
-        (`OnBootSec`), since a reboot or a system rebuild is exactly the
-        moment these properties are most likely to have reverted -- see the
-        module header.
+        or timer activation (`OnActiveSec`), since a reboot or a system
+        rebuild is exactly the moment these properties are most likely to
+        have reverted -- see the module header.
       '';
     };
   };
@@ -184,9 +184,11 @@ in
       description = "Periodic backup receive-destination invariant enforcement";
       wantedBy = [ "timers.target" ];
       timerConfig = {
-        OnBootSec = "2min";
+        # Timer-relative rather than boot-relative: this unit can first be
+        # activated after the boot-relative deadline has already passed.
+        # OnActiveSec always gives OnUnitActiveSec a current-boot baseline.
+        OnActiveSec = "2min";
         OnUnitActiveSec = cfg.interval;
-        Persistent = true;
       };
     };
   };

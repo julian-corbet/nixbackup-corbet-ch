@@ -150,6 +150,49 @@
             pkgs.writeText "nixbackup-host-drvpath"
               (builtins.unsafeDiscardStringContext host.config.system.build.toplevel.drvPath);
 
+          # A monotonic interval must acquire a baseline every time its timer
+          # unit is activated. OnBootSec can already be behind us when the
+          # timer first appears after late target convergence or a rebuild;
+          # if the service has not run in this boot, OnUnitActiveSec then has
+          # no current-boot activation to follow and systemd may leave the
+          # timer active(elapsed) with Trigger=n/a forever. OnActiveSec is
+          # relative to the timer activation itself and therefore cannot miss
+          # its first tick. Persistent is for catching up calendar timers;
+          # carrying its old timestamp into this monotonic chain is neither
+          # useful nor safe.
+          interval-timers-rearm-after-activation =
+            let
+              timers = host.config.systemd.timers;
+              cases = [
+                {
+                  name = "nixbackup-monitor";
+                  first = "10min";
+                  every = "6h";
+                }
+                {
+                  name = "nixbackup-destinations";
+                  first = "2min";
+                  every = "1h";
+                }
+                {
+                  name = "nixbackup-autobootstrap";
+                  first = "15min";
+                  every = "1d";
+                }
+              ];
+              safe = c:
+                let t = timers.${c.name}.timerConfig;
+                in
+                t.OnActiveSec == c.first
+                && t.OnUnitActiveSec == c.every
+                && !(t ? OnBootSec)
+                && !(t ? Persistent);
+            in
+            if builtins.all safe cases then
+              pkgs.runCommand "nixbackup-check-interval-timers-rearm" { } "echo ok > $out"
+            else
+              throw "nixbackup interval timers must seed every activation with OnActiveSec and must not carry OnBootSec/Persistent state";
+
           # 2. The finding in studies/phantom-write-footgun.md, made executable.
           #    Mounting a receive destination causes a few bytes of mount-time
           #    metadata churn, which `zfs receive` cannot distinguish from real
