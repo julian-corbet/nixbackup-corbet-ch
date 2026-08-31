@@ -294,6 +294,10 @@ needs to stamp `org.nixbackup:enabled=on` and
               pool-mirror = {
                 kind = "zfs-dynamic";
                 scanRoot = "tank";
+                # Optional: explicitly accepted historical replicas. Any
+                # other destination-only dataset turns this target red and
+                # is named in the error.
+                retainedDestinationPatterns = [ "tank/backups/dbs/retired-app" ];
                 cadence = {
                   weekdays = [ "Mon" "Tue" "Wed" "Thu" "Fri" ];
                   atHour = 3;

@@ -95,11 +95,14 @@
               # Ground-truth replication-plan discovery: every plan root
               # tagged `org.nixbackup:enabled=on` under `tank`, diffed
               # structurally against its destination, MIN-reduced over
-              # every actual leaf on the destination side.
+              # every current source-derived leaf on the destination side.
               pool-mirror = {
                 kind = "zfs-dynamic";
                 scanRoot = "tank";
                 excludePatterns = [ "tank/scratch" ];
+                # Optional, destination-side: known historical replicas whose
+                # sources were deliberately retired. Unknown extras still fail.
+                retainedDestinationPatterns = [ "pool/backups/retired-app" ];
                 cadence = {
                   weekdays = [ "Mon" "Tue" "Wed" "Thu" "Fri" ];
                   atHour = 3;

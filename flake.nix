@@ -272,6 +272,85 @@
               }
             ];
 
+          # 3a. Destination membership is a lifecycle signal, not freshness.
+          #     A source disappearing while its replica is retained must name
+          #     that exact destination as an actionable failure. Once the
+          #     operator explicitly classifies a historical replica, it must
+          #     neither fail membership nor drag active freshness backwards.
+          monitor-dynamic-classifies-destination-only-replicas =
+            pkgs.runCommand "nixbackup-check-monitor-destination-only"
+              {
+                script = units.nixbackup-monitor.script;
+                passAsFile = [ "script" ];
+              }
+              ''
+                cp "$scriptPath" ./script.sh
+                sed -n '/ZFS_DYNAMIC_SCAN_BEGIN/,/ZFS_DYNAMIC_SCAN_END/p' ./script.sh > ./dynamic-scan.sh
+                [ -s ./dynamic-scan.sh ] || {
+                  echo "FAIL — could not extract the zfs-dynamic scan" >&2
+                  exit 1
+                }
+
+                mkdir ./mockbin
+                cat > ./mockbin/zfs <<'MOCK_ZFS'
+                #!${pkgs.bash}/bin/bash
+                case "$*" in
+                  "get -s local -Ho name,value org.nixbackup:enabled -r example-hot")
+                    printf '%s\n' 'example-hot/data on'
+                    ;;
+                  "get -Ho value org.nixbackup:destination example-hot/data")
+                    printf '%s\n' 'example-cold/backups/data'
+                    ;;
+                  "list -H -o name -r example-hot/data")
+                    printf '%s\n' 'example-hot/data' 'example-hot/data/live'
+                    ;;
+                  "list -H -o name example-cold/backups/data")
+                    printf '%s\n' 'example-cold/backups/data'
+                    ;;
+                  "list -H -o name example-cold/backups/data/live")
+                    printf '%s\n' 'example-cold/backups/data/live'
+                    ;;
+                  "list -H -o name -r example-cold/backups/data")
+                    printf '%s\n' \
+                      'example-cold/backups/data' \
+                      'example-cold/backups/data/live' \
+                      'example-cold/backups/data/orphan' \
+                      'example-cold/backups/data/retained'
+                    ;;
+                  "list -t snapshot -H -o creation -p -d 1 example-cold/backups/data/live")
+                    printf '%s\n' 200
+                    ;;
+                  *)
+                    printf 'unexpected mock zfs call: %s\n' "$*" >&2
+                    exit 90
+                    ;;
+                esac
+                MOCK_ZFS
+                chmod +x ./mockbin/zfs
+
+                export PATH="$PWD/mockbin:${lib.makeBinPath [ pkgs.coreutils pkgs.gawk ]}"
+                fail=""
+                oldest=""
+                . ./dynamic-scan.sh
+
+                if [ "$oldest" = 200 ]; then
+                  echo "ok   — freshness comes only from the current source-derived leaf"
+                else
+                  echo "FAIL — active freshness was $oldest, wanted 200" >&2
+                  exit 1
+                fi
+
+                want=' example-cold/backups/data/orphan(destination-only)'
+                if [ "$fail" = "$want" ]; then
+                  echo "ok   — unknown destination-only replica is named; retained replica is accepted"
+                else
+                  echo "FAIL — structural finding was '$fail', wanted '$want'" >&2
+                  exit 1
+                fi
+
+                echo "destination-only lifecycle is classified correctly" > $out
+              '';
+
           # 3b. The cadence claim from the module header, EXECUTED rather than
           #     grepped: a weekend evaluation compares against the last expected
           #     WEEKDAY run and never invents a deadline on a day the job does

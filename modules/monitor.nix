@@ -142,13 +142,15 @@ let
             zfs-dynamic    — enumerates replication plans from ZFS
                              user-properties at RUNTIME (`enabledProperty` +
                              `destinationProperty`, scanned under
-                             `scanRoot`), diffs every source child against
-                             its destination (missing = failure, naming the
-                             child), and MIN-reduces freshness over every
-                             actual LEAF dataset on the destination side --
-                             not just the declared plan roots, so a stalled
-                             grandchild cannot hide behind a fresh sibling
-                             two levels up. `paths` is unused for this kind;
+                             `scanRoot`), diffs the source and destination in
+                             BOTH directions, and names either a missing
+                             replica or an unexpected destination-only
+                             replica as an actionable structural failure.
+                             Freshness is MIN-reduced over the current
+                             SOURCE-derived leaf set, so a retained replica
+                             cannot masquerade as a stalled active backup and
+                             a stalled current grandchild cannot hide behind
+                             a fresh sibling. `paths` is unused for this kind;
                              `maxAgeHours` is replaced by `cadence` if set,
                              else falls back to `maxAgeHours` as an ordinary
                              flat threshold.
@@ -180,6 +182,23 @@ let
           and the freshness leaf scan, on both the source and destination
           side. Uses the same matching rule as
           `nixbackup.autobootstrap.excludePatterns`.
+        '';
+      };
+
+      retainedDestinationPatterns = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [ "tank/backups/dbs/retired-app" ];
+        description = ''
+          kind zfs-dynamic only: destination-side dataset prefixes (matched
+          exactly, or as "prefix/*") which are intentionally retained after
+          their source disappeared. They are excluded from active freshness
+          and from the destination-only structural failure.
+
+          This is deliberately a separate, explicit list rather than an
+          automatic "ignore everything extra" rule: an unplanned source
+          deletion must turn the monitor red and name the surviving replica
+          until an operator classifies it. This option never destroys data.
         '';
       };
 
@@ -605,10 +624,21 @@ in
               done
             ''}
             ${lib.optionalString (t.kind == "zfs-dynamic") ''
+              # ZFS_DYNAMIC_SCAN_BEGIN (checks extract and execute this block)
               EXCLUDES=(${lib.escapeShellArgs t.excludePatterns})
               is_excluded() {
                 local ds="$1" pat
                 for pat in "''${EXCLUDES[@]:-}"; do
+                  [ -z "$pat" ] && continue
+                  case "$ds" in "$pat"|"$pat"/*) return 0 ;; esac
+                done
+                return 1
+              }
+
+              RETAINED_DESTINATIONS=(${lib.escapeShellArgs t.retainedDestinationPatterns})
+              is_retained_destination() {
+                local ds="$1" pat
+                for pat in "''${RETAINED_DESTINATIONS[@]:-}"; do
                   [ -z "$pat" ] && continue
                   case "$ds" in "$pat"|"$pat"/*) return 0 ;; esac
                 done
@@ -632,12 +662,22 @@ in
                   continue
                 fi
 
+                # Snapshot the live source membership ONCE. It drives all three
+                # decisions below: expected destination membership, active leaf
+                # freshness, and the reverse destination-only diff. Reading the
+                # destination as the freshness authority makes a safely retained
+                # replica look like a stalled active source after that source is
+                # deliberately retired.
+                mapfile -t ZSRC_ALL < <(zfs list -H -o name -r "$zroot" 2>/dev/null)
+                declare -A ZEXPECTED=()
+
                 # ── structural completeness: every source child must exist at dest ──
-                while IFS= read -r src_ds; do
+                for src_ds in "''${ZSRC_ALL[@]:-}"; do
                   [ -z "$src_ds" ] && continue
                   is_excluded "$src_ds" && continue
                   zrel="''${src_ds#"$zroot"}"
                   zdst_ds="$zdst$zrel"
+                  ZEXPECTED["$zdst_ds"]=1
                   zfs list -H -o name "$zdst_ds" >/dev/null 2>&1 || fail="$fail $zdst_ds(missing-on-dest)"
                   # NO `tail -n +2`. `zfs list -r` emits the ROOT first, so dropping line 1 makes
                   # this check blind to the plan root itself: when the destination ROOT is what is
@@ -649,27 +689,45 @@ in
                   #
                   # `zrel` is empty for the root, so `zdst_ds` is exactly `$zdst`, which is the
                   # dataset a human then has to create.
-                done < <(zfs list -H -o name -r "$zroot" 2>/dev/null)
+                done
 
-                # ── freshness: MIN over every LEAF actually present at dest
-                # (not just the named roots -- a stalled grandchild must not
-                # hide behind a fresh sibling) ──
+                # ── reverse structural completeness: every destination dataset
+                # must still map to a source, unless explicitly classified as a
+                # retained historical replica. This is what turns an unplanned
+                # source deletion red with the exact path, instead of silently
+                # accepting it or misreporting it later as generic staleness. ──
                 mapfile -t ZDST_ALL < <(zfs list -H -o name -r "$zdst" 2>/dev/null)
                 for zds in "''${ZDST_ALL[@]:-}"; do
                   [ -z "$zds" ] && continue
                   is_excluded "$zds" && continue
+                  is_retained_destination "$zds" && continue
+                  [ -n "''${ZEXPECTED[$zds]+x}" ] || fail="$fail $zds(destination-only)"
+                done
+
+                # ── freshness: MIN over every CURRENT SOURCE leaf, mapped to
+                # its destination. A retained destination-only replica is not an
+                # active backup; conversely, a current stalled grandchild must not
+                # hide behind a fresh sibling or parent. ──
+                for src_ds in "''${ZSRC_ALL[@]:-}"; do
+                  [ -z "$src_ds" ] && continue
+                  is_excluded "$src_ds" && continue
                   is_leaf=1
-                  for zother in "''${ZDST_ALL[@]:-}"; do
-                    [ "$zother" = "$zds" ] && continue
-                    case "$zother" in "$zds"/*) is_leaf=0; break ;; esac
+                  for src_other in "''${ZSRC_ALL[@]:-}"; do
+                    [ "$src_other" = "$src_ds" ] && continue
+                    is_excluded "$src_other" && continue
+                    case "$src_other" in "$src_ds"/*) is_leaf=0; break ;; esac
                   done
                   [ "$is_leaf" -eq 1 ] || continue
-                  e=$(zfs list -t snapshot -H -o creation -p -d 1 "$zds" 2>/dev/null | sort -n | tail -1)
-                  if [ -z "$e" ]; then fail="$fail $zds(no-snapshot)"; continue; fi
+                  zrel="''${src_ds#"$zroot"}"
+                  zdst_ds="$zdst$zrel"
+                  e=$(zfs list -t snapshot -H -o creation -p -d 1 "$zdst_ds" 2>/dev/null | sort -n | tail -1)
+                  if [ -z "$e" ]; then fail="$fail $zdst_ds(no-snapshot)"; continue; fi
                   if [ -z "$oldest" ] || [ "$e" -lt "$oldest" ]; then oldest="$e"; fi
                 done
+                unset ZEXPECTED
               done
 
+              # ZFS_DYNAMIC_SCAN_END
               ${lib.optionalString (t.cadence != null) ''
                 zdyn_expected=$(expected_run_epoch ${cadenceArgs t.cadence})
                 zdyn_deadline=$(( zdyn_expected + ${toString t.cadence.slackHours} * 3600 ))

@@ -84,6 +84,9 @@
         kind = "zfs-dynamic";
         scanRoot = "example-hot";
         excludePatterns = [ "example-hot/scratch" ];
+        # This replica was deliberately retained after its source retired.
+        # Any other destination-only dataset remains an actionable failure.
+        retainedDestinationPatterns = [ "example-cold/backups/data/retained" ];
         cadence = {
           weekdays = [ "Mon" "Tue" "Wed" "Thu" "Fri" ];
           atHour = 3;
